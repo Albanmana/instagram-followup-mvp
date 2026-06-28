@@ -245,15 +245,19 @@ function handleCSVFile(file) {
       handleTd.textContent = `@${row.handle}`;
       const msgTd = document.createElement("td");
       msgTd.textContent = row.message.length > 55 ? row.message.slice(0, 55) + "…" : row.message;
+      const gifTd = document.createElement("td");
+      const hasGif = ["true", "1", "yes"].includes((row.has_gif ?? "").toLowerCase());
+      gifTd.textContent = hasGif && row.gif_query ? row.gif_query : "—";
       tr.appendChild(handleTd);
       tr.appendChild(msgTd);
+      tr.appendChild(gifTd);
       csvRowsBody.appendChild(tr);
     }
 
     if (parsedRows.length > 20) {
       const tr = document.createElement("tr");
       const td = document.createElement("td");
-      td.colSpan = 2;
+      td.colSpan = 3;
       td.style.color = "#7a5c3e";
       td.textContent = `… and ${parsedRows.length - 20} more row(s)`;
       tr.appendChild(td);

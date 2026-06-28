@@ -25,7 +25,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return true;
 });
 
-async function sendTestMessage({ handle, message }) {
+async function sendTestMessage({ handle, message, has_gif, gif_query }) {
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   await clearRunLogs();
   await appendRunLog("background", `Starting run ${runId} for @${handle}.`);
@@ -44,10 +44,13 @@ async function sendTestMessage({ handle, message }) {
     await appendRunLog("background", `Tab ${tab.id} loaded.`);
     await delay(1500);
 
+    const hasGif = ["true", "1", "yes"].includes(String(has_gif ?? "").toLowerCase());
+    const gifQuery = (gif_query ?? "").trim();
+
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      args: [message, runId],
-      func: async (textToSend, activeRunId) => {
+      args: [message, runId, hasGif, gifQuery],
+      func: async (textToSend, activeRunId, hasGif, gifQuery) => {
       const runtime = window.chrome?.runtime;
       const sendLog = (stage, detail) => {
         console.log(`[IG Follow-Up][${activeRunId}][${stage}] ${detail}`);
@@ -245,6 +248,62 @@ async function sendTestMessage({ handle, message }) {
 
       const composer = await waitFor(findComposer, "the message composer");
       sendLog("composer", "Composer found.");
+
+      if (hasGif && gifQuery) {
+        sendLog("gif", `Sending GIF: "${gifQuery}"`);
+        const pickerBtn = await waitFor(
+          () => {
+            const btn = document.querySelector('button[aria-label="Choisir un GIF ou un sticker"]');
+            return btn && isVisible(btn) ? btn : null;
+          },
+          "GIF picker button",
+          5000
+        ).catch(() => null);
+
+        if (pickerBtn) {
+          pickerBtn.click();
+          await delay(800);
+
+          const gifTab =
+            Array.from(document.querySelectorAll('[role="tab"]'))
+              .find((el) => el.textContent?.trim().toUpperCase().includes("GIF"))
+            ?? document.querySelectorAll('[role="tab"]')[1];
+          gifTab?.click();
+          await delay(600);
+
+          const searchInput = await waitFor(
+            () => document.querySelector('input[aria-label="Rechercher dans GIPHY"]'),
+            "GIPHY search input",
+            5000
+          ).catch(() => null);
+
+          if (searchInput) {
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+            setter.call(searchInput, gifQuery);
+            searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+            await delay(1500);
+
+            const firstGif = await waitFor(
+              () => document.querySelector('button[aria-label="Send Animated Image"]'),
+              "GIF result",
+              8000
+            ).catch(() => null);
+
+            if (firstGif) {
+              firstGif.click();
+              sendLog("gif", "GIF sent.");
+              await delay(800);
+            } else {
+              sendLog("gif", "No GIF result found — skipping.");
+            }
+          } else {
+            sendLog("gif", "GIPHY search input not found — skipping.");
+          }
+        } else {
+          sendLog("gif", "GIF picker button not found — skipping.");
+        }
+      }
+
       setComposerValue(composer, textToSend);
       await delay(600);
 
@@ -428,10 +487,10 @@ async function processBatchItem(index) {
   }
 
   const row = batchQueue[index];
-  const { handle, message } = row;
+  const { handle, message, has_gif, gif_query } = row;
 
   try {
-    await sendTestMessage({ handle, message });
+    await sendTestMessage({ handle, message, has_gif, gif_query });
     await appendBatchLog({ handle, status: "sent", at: new Date().toISOString() });
     await callMarkDone(row);
   } catch (error) {
