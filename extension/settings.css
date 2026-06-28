@@ -1,0 +1,77 @@
+.settings-app {
+  min-width: 480px;
+  max-width: 580px;
+  margin: 0 auto;
+}
+
+.settings-section {
+  margin-bottom: 28px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid rgba(184, 154, 122, 0.3);
+}
+
+.settings-section:last-of-type {
+  border-bottom: none;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.autofetch-status {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.autofetch-status[data-state="active"]   { color: #1e6b43; }
+.autofetch-status[data-state="inactive"] { color: #7a5c3e; }
+
+select {
+  font: inherit;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #b89a7a;
+  border-radius: 8px;
+  padding: 10px 12px;
+  padding-right: 32px;
+  background: rgba(255, 252, 248, 0.95) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%2354463a' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 12px center;
+  color: #1d1d1f;
+  appearance: none;
+}
+
+.header-hint {
+  font-size: 12px;
+  font-weight: 400;
+  background: rgba(29, 29, 31, 0.08);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #54463a;
+  vertical-align: middle;
+}
+
+.apikey-saved {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.apikey-mask {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 20px;
+  letter-spacing: 4px;
+  color: #54463a;
+}
+
+.apikey-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.danger-button {
+  background: rgba(139, 30, 63, 0.1);
+  color: #8b1e3f;
+  border: 1px solid rgba(139, 30, 63, 0.2);
+}

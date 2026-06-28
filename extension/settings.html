@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Settings — Instagram Follow-Up</title>
+    <link rel="stylesheet" href="popup.css" />
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <main class="app settings-app">
+      <h1>Settings</h1>
+
+      <section class="settings-section">
+        <h2 class="section-title">Auto-fetch CSV</h2>
+        <div class="form">
+          <label class="field">
+            <span>Endpoint URL</span>
+            <input id="fetch-url" type="url" placeholder="https://your-n8n.com/webhook/leads" autocomplete="off" />
+          </label>
+          <label class="field">
+            <span>Interval</span>
+            <select id="fetch-interval">
+              <option value="0.5">30 minutes</option>
+              <option value="1">1 hour</option>
+              <option value="3" selected>3 hours</option>
+              <option value="6">6 hours</option>
+              <option value="12">12 hours</option>
+              <option value="24">24 hours</option>
+            </select>
+          </label>
+          <div class="toggle-row">
+            <button id="toggle-autofetch" type="button" class="secondary-button">Enable</button>
+            <span id="autofetch-status" class="autofetch-status" data-state="inactive">Inactive</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h2 class="section-title">API Key <code class="header-hint">x-api-key</code></h2>
+
+        <div id="apikey-entry" class="form">
+          <label class="field">
+            <span>API Key</span>
+            <input id="apikey-input" type="password" placeholder="Enter your API key" autocomplete="off" />
+          </label>
+          <button id="apikey-save" type="button">Save</button>
+        </div>
+
+        <div id="apikey-saved" class="apikey-saved" hidden>
+          <span class="apikey-mask">●●●●●●●●●●●●●●●●</span>
+          <div class="apikey-actions">
+            <button id="apikey-replace" type="button" class="secondary-button">Replace</button>
+            <button id="apikey-delete" type="button" class="danger-button">Delete</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h2 class="section-title">CRM Sync</h2>
+        <div class="form">
+          <label class="field">
+            <span>CRM Webhook URL</span>
+            <input id="crm-url" type="url" placeholder="https://your-n8n.com/webhook/crm-sync" autocomplete="off" />
+          </label>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h2 class="section-title">CRM API Key <code class="header-hint">x-api-key</code></h2>
+
+        <div id="crm-apikey-entry" class="form">
+          <label class="field">
+            <span>API Key</span>
+            <input id="crm-apikey-input" type="password" placeholder="Enter your CRM API key" autocomplete="off" />
+          </label>
+          <button id="crm-apikey-save" type="button">Save</button>
+        </div>
+
+        <div id="crm-apikey-saved" class="apikey-saved" hidden>
+          <span class="apikey-mask">●●●●●●●●●●●●●●●●</span>
+          <div class="apikey-actions">
+            <button id="crm-apikey-replace" type="button" class="secondary-button">Replace</button>
+            <button id="crm-apikey-delete" type="button" class="danger-button">Delete</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h2 class="section-title">Mark Done Webhook</h2>
+        <p class="section-desc">Called after each CSV row is sent successfully to date your CRM.</p>
+        <div class="form">
+          <label class="field">
+            <span>Endpoint URL</span>
+            <input id="mark-done-url" type="url" placeholder="https://your-n8n.com/webhook/mark-done" autocomplete="off" />
+          </label>
+        </div>
+      </section>
+
+      <p id="settings-status" class="status" aria-live="polite"></p>
+    </main>
+    <script src="settings.js"></script>
+  </body>
+</html>

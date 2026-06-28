@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Instagram Follow-Up MVP",
+  "version": "0.1.0",
+  "description": "Minimal MV3 extension that opens Instagram and sends a test message.",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://www.instagram.com/*",
+    "*://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["crm-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["crm-interceptor.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "options_ui": {
+    "page": "settings.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "Instagram Follow-Up MVP",
+    "default_popup": "popup.html"
+  }
+}

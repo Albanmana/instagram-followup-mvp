@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Instagram Follow-Up MVP</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="app">
+      <h1>Test sender <button id="toggle-batch-button" type="button" class="text-button">CSV batch ↓</button><button id="settings-button" type="button" class="settings-button" title="Settings">⚙</button></h1>
+
+      <section id="autofetch-section" class="autofetch-section">
+        <div class="autofetch-row">
+          <span class="autofetch-label">Auto-fetch</span>
+          <span id="autofetch-badge" class="autofetch-badge" data-state="inactive">Inactive</span>
+          <select id="autofetch-interval" class="autofetch-interval" title="Intervalle">
+            <option value="0.5">30 min</option>
+            <option value="1">1h</option>
+            <option value="3">3h</option>
+            <option value="6">6h</option>
+            <option value="12">12h</option>
+            <option value="24">24h</option>
+          </select>
+          <button id="autofetch-toggle" type="button" class="secondary-button autofetch-toggle-btn">Enable</button>
+        </div>
+        <p id="autofetch-countdown" class="autofetch-countdown" hidden></p>
+        <button id="autofetch-trigger" type="button" class="secondary-button autofetch-trigger-btn">▶ Trigger now</button>
+      </section>
+
+      <section id="crm-section" class="autofetch-section">
+        <div class="autofetch-row">
+          <span class="autofetch-label">CRM Sync</span>
+          <span id="crm-badge" class="autofetch-badge" data-state="inactive">Inactive</span>
+          <select id="crm-interval" class="autofetch-interval" title="Interval">
+            <option value="1">1h</option>
+            <option value="2">2h</option>
+            <option value="6" selected>6h</option>
+            <option value="12">12h</option>
+            <option value="24">24h</option>
+          </select>
+          <button id="crm-toggle" type="button" class="secondary-button autofetch-toggle-btn">Enable</button>
+        </div>
+        <p id="crm-countdown" class="autofetch-countdown" hidden></p>
+        <div class="autofetch-row">
+          <button id="crm-trigger" type="button" class="secondary-button autofetch-trigger-btn">▶ Trigger now</button>
+          <button id="crm-logs-button" type="button" class="secondary-button">Show CRM logs</button>
+        </div>
+        <p id="crm-last-sync" class="autofetch-countdown" hidden></p>
+        <pre id="crm-logs" class="logs" hidden></pre>
+      </section>
+
+      <section id="batch-section" class="batch-section">
+        <div id="csv-drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Drop CSV file here or click to browse">
+          <span class="drop-zone__label">Drop .csv here or <span class="drop-zone__link">browse</span></span>
+          <input id="csv-file-input" type="file" accept=".csv" hidden />
+        </div>
+        <p id="csv-preview" class="csv-preview" hidden></p>
+        <div id="csv-rows-preview" class="csv-rows-preview" hidden>
+          <table class="batch-table">
+            <thead><tr><th>Handle</th><th>Message</th></tr></thead>
+            <tbody id="csv-rows-body"></tbody>
+          </table>
+        </div>
+        <label class="field delay-field">
+          <span>Delay between sends (seconds)</span>
+          <input id="delay-input" type="number" min="5" max="3600" value="400" />
+        </label>
+        <button id="start-batch-button" type="button" disabled>Start batch</button>
+
+        <div id="batch-progress" hidden>
+          <p id="batch-summary" class="batch-summary"></p>
+          <p id="countdown-display" class="countdown-display" hidden></p>
+          <table class="batch-table">
+            <thead><tr><th>Handle</th><th>Statut</th></tr></thead>
+            <tbody id="batch-log-body"></tbody>
+          </table>
+          <button id="stop-batch-button" type="button" class="secondary-button">Stop batch</button>
+        </div>
+      </section>
+      <form id="message-form" class="form">
+        <label class="field">
+          <span>Instagram handle</span>
+          <input id="handle" name="handle" type="text" placeholder="username" autocomplete="off" required />
+        </label>
+
+        <label class="field">
+          <span>Test message</span>
+          <textarea
+            id="message"
+            name="message"
+            rows="5"
+            placeholder="Test depuis mon extension locale"
+            required
+          ></textarea>
+        </label>
+
+        <button id="submit-button" type="submit">Send test message</button>
+        <button id="logs-button" type="button" class="secondary-button">Show latest logs</button>
+      </form>
+
+      <p id="status" class="status" aria-live="polite">Ready.</p>
+      <pre id="logs" class="logs" hidden></pre>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+  </html>
