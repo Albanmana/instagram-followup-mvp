@@ -427,7 +427,7 @@ async function loadCrmStatus() {
 loadCrmStatus();
 
 crmToggle.addEventListener("click", async () => {
-  const { crmSyncEnabled = false, crmWebhookUrl = "" } =
+  const { crmSyncEnabled = false, crmWebhookUrl = "https://n8n.srv765660.hstgr.cloud/webhook/8472dc92-a513-4739-bc7a-0261e2e71b00" } =
     await chrome.storage.local.get(["crmSyncEnabled", "crmWebhookUrl"]);
   const next = !crmSyncEnabled;
   const hours = parseFloat(crmInterval.value);
@@ -554,7 +554,7 @@ async function loadAutoFetchStatus() {
 loadAutoFetchStatus();
 
 autofetchToggle.addEventListener("click", async () => {
-  const { autoFetchEnabled = false, autoFetchUrl = "" } =
+  const { autoFetchEnabled = false, autoFetchUrl = "https://n8n.srv765660.hstgr.cloud/webhook/ada824b2-daf0-4209-b302-38cbcce1e57e" } =
     await chrome.storage.local.get(["autoFetchEnabled", "autoFetchUrl"]);
   const next = !autoFetchEnabled;
   const hours = parseFloat(autofetchInterval.value);
