@@ -4,6 +4,9 @@ const DEFAULT_AUTO_FETCH_URL = "https://n8n.srv765660.hstgr.cloud/webhook/ada824
 const DEFAULT_MARK_DONE_URL  = "https://n8n.srv765660.hstgr.cloud/webhook/405003b5-07bb-47bf-a087-15714542fd31";
 const DEFAULT_BATCH_DELAY    = 400;
 const DEFAULT_N8N_API_KEY    = "ExPA5$sG5ngS9h?G";
+const SCRAPE_POST_TIMEOUT_MS = 30000;
+const SCRAPE_PROFILE_TIMEOUT_MS = 12000;
+const SCRAPE_LOG_LIMIT = 300;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "GET_RUN_LOGS") {
@@ -519,6 +522,217 @@ async function getRunLogs() {
   return runLogs;
 }
 
+let activeScrapeRuntime = null;
+
+function createScrapeRuntime(job) {
+  return {
+    job,
+    stopRequested: false,
+    collectedLeadsByUsername: new Map(),
+    profilesByUsername: new Map(),
+    profileWaiters: new Map(),
+    postTabId: null,
+    profileTabId: null,
+  };
+}
+
+function normalizeText(value) {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parseKeywordList(value) {
+  return String(value ?? "")
+    .split(/[\n,]/)
+    .map((item) => normalizeText(item))
+    .filter(Boolean);
+}
+
+function parseBoolean(value) {
+  return value === true || ["true", "1", "yes", "on"].includes(String(value ?? "").toLowerCase());
+}
+
+function parsePositiveInteger(value, fallback) {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseNonNegativeInteger(value, fallback) {
+  const parsed = parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function normalizeInstagramProfileTarget(rawValue) {
+  const value = String(rawValue || "").trim();
+  if (!value) {
+    throw new Error("Profile URL or handle is required.");
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    let parsed;
+    try {
+      parsed = new URL(value);
+    } catch {
+      throw new Error("Invalid Instagram profile URL.");
+    }
+
+    const hostname = parsed.hostname.replace(/^www\./i, "");
+    if (hostname !== "instagram.com") {
+      throw new Error("The profile URL must be an Instagram URL.");
+    }
+
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const username = segments[0];
+    if (!username || ["p", "reel", "tv", "explore", "stories", "direct"].includes(username)) {
+      throw new Error("The URL must point to an Instagram profile.");
+    }
+
+    return `https://www.instagram.com/${username.replace(/^@+/, "")}/`;
+  }
+
+  const handle = value.replace(/^@+/, "").replace(/^https?:\/\/www\.instagram\.com\//i, "").replace(/\/+$/, "");
+  if (!handle || handle.includes("/") || handle.includes("?")) {
+    throw new Error("Profile URL or handle is invalid.");
+  }
+
+  return `https://www.instagram.com/${handle}/`;
+}
+
+function normalizePostUrl(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || "").trim());
+  } catch {
+    throw new Error("Invalid post URL.");
+  }
+
+  if (!/instagram\.com$/i.test(parsed.hostname) && !/instagram\.com$/i.test(parsed.hostname.replace(/^www\./i, ""))) {
+    throw new Error("The post URL must be an Instagram URL.");
+  }
+
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length < 2 || !["p", "reel", "tv"].includes(segments[0])) {
+    throw new Error("The URL must point to an Instagram post or reel.");
+  }
+
+  return `https://www.instagram.com/${segments[0]}/${segments[1]}/`;
+}
+
+function buildScrapeFilters(input = {}) {
+  const sourceType = ["comments", "followers", "following"].includes(input.sourceType)
+    ? input.sourceType
+    : "comments";
+  const targetUrl = sourceType === "comments"
+    ? normalizePostUrl(input.postUrl)
+    : normalizeInstagramProfileTarget(input.postUrl);
+
+  return {
+    sourceType,
+    postUrl: targetUrl,
+    includeKeywords: parseKeywordList(input.includeKeywords),
+    excludeKeywords: parseKeywordList(input.excludeKeywords),
+    minimumCommentLength: Math.max(0, parseNonNegativeInteger(input.minimumCommentLength, 0)),
+    maxLeads: Math.max(1, parsePositiveInteger(input.maxLeads, 30)),
+    profileEnrichment: parseBoolean(input.profileEnrichment),
+  };
+}
+
+async function appendScrapeLog(message) {
+  const { scrapeLogs = [] } = await chrome.storage.local.get("scrapeLogs");
+  const next = [...scrapeLogs, { at: new Date().toISOString(), message }].slice(-SCRAPE_LOG_LIMIT);
+  await chrome.storage.local.set({ scrapeLogs: next });
+  console.log(`[IG Follow-Up][scrape] ${message}`);
+}
+
+async function setScrapeCursor(cursor) {
+  await chrome.storage.local.set({ scrapeCursor: cursor });
+}
+
+async function setScrapeStatus(status) {
+  await chrome.storage.local.set({ scrapeStatus: status });
+}
+
+async function getScrapeState() {
+  return chrome.storage.local.get([
+    "scrapeJob",
+    "scrapeStatus",
+    "scrapeCursor",
+    "scrapeResults",
+    "scrapeLogs",
+    "scrapeFilters",
+  ]);
+}
+
+async function initializeScrapeState(job, filters) {
+  await chrome.storage.local.set({
+    scrapeJob: job,
+    scrapeStatus: "running",
+    scrapeCursor: { phase: "starting", collectedCount: 0, enrichedCount: 0 },
+    scrapeResults: [],
+    scrapeLogs: [],
+    scrapeFilters: filters,
+  });
+}
+
+async function setScrapeResults(results) {
+  await chrome.storage.local.set({
+    scrapeResults: Array.isArray(results) ? results : [],
+  });
+}
+
+async function finalizeScrapeState(status, results) {
+  const enrichedCount = results.filter((item) =>
+    [item.bio, item.followers_count, item.posts_count, item.external_links]
+      .some((value) => value != null && value !== "")
+  ).length;
+
+  await chrome.storage.local.set({
+    scrapeStatus: status,
+    scrapeResults: results,
+    scrapeCursor: {
+      phase: status,
+      collectedCount: results.length,
+      enrichedCount,
+    },
+  });
+}
+
+async function cleanupActiveScrapeTabs() {
+  if (!activeScrapeRuntime) return;
+
+  const tabIds = [activeScrapeRuntime.postTabId, activeScrapeRuntime.profileTabId].filter(Boolean);
+  activeScrapeRuntime.postTabId = null;
+  activeScrapeRuntime.profileTabId = null;
+
+  for (const tabId of tabIds) {
+    await chrome.tabs.remove(tabId).catch(() => {});
+  }
+}
+
+async function stopActiveScrape(reason = "stopped") {
+  if (!activeScrapeRuntime) {
+    await setScrapeStatus("stopped");
+    return;
+  }
+
+  activeScrapeRuntime.stopRequested = true;
+  activeScrapeRuntime.profileWaiters.forEach(({ resolve }) => resolve(null));
+  activeScrapeRuntime.profileWaiters.clear();
+  await appendScrapeLog(`Scrape stopped: ${reason}.`);
+  await cleanupActiveScrapeTabs();
+  await setScrapeStatus("stopped");
+  await setScrapeCursor({ phase: "stopped", reason });
+  activeScrapeRuntime = null;
+}
+
+function ensureScrapeNotStopped() {
+  if (activeScrapeRuntime?.stopRequested) {
+    throw new Error("Scrape stopped.");
+  }
+}
+
 async function getBatchState() {
   const {
     batchQueue = [],
@@ -710,6 +924,915 @@ function parseCSVText(text) {
     acc.push(row);
     return acc;
   }, []);
+}
+
+function formatTimestamp(value) {
+  if (value == null || value === "") return "";
+
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) {
+    const millis = numeric > 1e12 ? numeric : numeric > 1e10 ? numeric : numeric * 1000;
+    return new Date(millis).toISOString();
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString();
+}
+
+function getNestedValue(obj, path) {
+  return path.reduce((current, key) => current?.[key], obj);
+}
+
+function recursiveWalk(value, visitor, seen = new WeakSet()) {
+  if (!value || typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
+
+  visitor(value);
+
+  if (Array.isArray(value)) {
+    value.forEach((item) => recursiveWalk(item, visitor, seen));
+    return;
+  }
+
+  Object.values(value).forEach((child) => recursiveWalk(child, visitor, seen));
+}
+
+function extractCommentsFromNetworkPayload(payload, postUrl) {
+  const results = [];
+  const seen = new Set();
+
+  recursiveWalk(payload, (node) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+
+    const username =
+      node.user?.username ||
+      node.owner?.username ||
+      node.commenter?.username ||
+      node.pk_user?.username ||
+      null;
+
+    const text =
+      (typeof node.text === "string" && node.text) ||
+      (typeof node.comment_text === "string" && node.comment_text) ||
+      (typeof node.body === "string" && node.body) ||
+      null;
+
+    if (!username || !text) return;
+
+    const key = `${username}::${text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+
+    results.push({
+      source_type: "comments",
+      username,
+      name:
+        node.user?.full_name ||
+        node.owner?.full_name ||
+        node.commenter?.full_name ||
+        node.pk_user?.full_name ||
+        "",
+      profile_url: `https://www.instagram.com/${username}/`,
+      is_verified:
+        typeof (node.user?.is_verified ?? node.owner?.is_verified ?? node.commenter?.is_verified ?? node.pk_user?.is_verified) === "boolean"
+          ? (node.user?.is_verified ?? node.owner?.is_verified ?? node.commenter?.is_verified ?? node.pk_user?.is_verified)
+          : "",
+      comment_text: text.trim(),
+      comment_date: formatTimestamp(node.created_at ?? node.created_at_utc ?? node.timestamp ?? node.created_at_text),
+      post_url: postUrl,
+    });
+  });
+
+  return results;
+}
+
+function extractProfileFromNetworkPayload(payload, expectedUsername) {
+  const target = normalizeText(expectedUsername);
+  let best = null;
+
+  recursiveWalk(payload, (node) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+
+    const username = normalizeText(node.username);
+    if (!username || username !== target) return;
+
+    const bio =
+      node.biography ||
+      node.bio ||
+      node.biography_text ||
+      "";
+
+    const followerCount =
+      node.edge_followed_by?.count ??
+      node.followers_count ??
+      node.follower_count ??
+      null;
+
+    const postsCount =
+      node.edge_owner_to_timeline_media?.count ??
+      node.media_count ??
+      node.posts_count ??
+      null;
+
+    const externalLinks = [];
+    if (Array.isArray(node.bio_links)) {
+      node.bio_links.forEach((link) => {
+        const url = link?.url || link?.link_url || link?.href;
+        if (url) externalLinks.push(url);
+      });
+    }
+    if (Array.isArray(node.biography_with_entities?.entities)) {
+      node.biography_with_entities.entities.forEach((entity) => {
+        const url = entity?.link?.url || entity?.link?.external_url;
+        if (url) externalLinks.push(url);
+      });
+    }
+    if (node.external_url) externalLinks.push(node.external_url);
+    if (node.external_url_linkshimmed) externalLinks.push(node.external_url_linkshimmed);
+
+    const candidate = {
+      name: String(node.full_name || node.name || "").trim(),
+      bio: String(bio || "").trim(),
+      followers_count: followerCount != null ? Number(followerCount) : null,
+      posts_count: postsCount != null ? Number(postsCount) : null,
+      is_private: typeof node.is_private === "boolean" ? node.is_private : null,
+      is_verified: typeof node.is_verified === "boolean" ? node.is_verified : null,
+      is_business_account:
+        typeof node.is_business_account === "boolean"
+          ? node.is_business_account
+          : typeof node.account_type === "number"
+            ? node.account_type === 2
+            : null,
+      external_links: [...new Set(externalLinks.filter(Boolean))].join(" | "),
+    };
+
+    const score = [
+      candidate.bio,
+      candidate.followers_count,
+      candidate.posts_count,
+      candidate.is_private,
+      candidate.is_verified,
+      candidate.is_business_account,
+      candidate.external_links,
+    ].filter((value) => value != null && value !== "").length;
+
+    if (!best || score > best.score) {
+      best = { score, profile: candidate };
+    }
+  });
+
+  return best?.profile ?? null;
+}
+
+function dedupeLeadsByUsername(leads) {
+  const seen = new Set();
+  const results = [];
+
+  for (const lead of leads) {
+    const username = normalizeText(lead.username);
+    if (!username || seen.has(username)) continue;
+    seen.add(username);
+    results.push(lead);
+  }
+
+  return results;
+}
+
+function matchesAnyKeyword(text, keywords) {
+  const haystack = normalizeText(text);
+  if (!keywords.length) return true;
+  return keywords.some((keyword) => haystack.includes(keyword));
+}
+
+function matchesNoKeyword(text, keywords) {
+  const haystack = normalizeText(text);
+  return !keywords.some((keyword) => haystack.includes(keyword));
+}
+
+function passesLeadFilters(lead, filters, includeBio = false) {
+  const commentText = (lead.comment_text || "").trim();
+  const username = (lead.username || "").trim();
+  const name = (lead.name || "").trim();
+  const bioText = includeBio ? (lead.bio || "").trim() : "";
+  const searchable = filters.sourceType === "comments"
+    ? includeBio ? `${commentText}\n${bioText}` : commentText
+    : [username, name, bioText].filter(Boolean).join("\n");
+
+  if (filters.sourceType === "comments" && commentText.length < filters.minimumCommentLength) {
+    return false;
+  }
+
+  if (!matchesNoKeyword(searchable, filters.excludeKeywords)) {
+    return false;
+  }
+
+  if (!filters.includeKeywords.length) {
+    return true;
+  }
+
+  return matchesAnyKeyword(searchable, filters.includeKeywords);
+}
+
+function createCsvContent(rows) {
+  const headers = [
+    "source_type",
+    "username",
+    "name",
+    "profile_url",
+    "is_verified",
+    "comment_text",
+    "comment_date",
+    "bio",
+    "followers_count",
+    "posts_count",
+    "is_private",
+    "is_business_account",
+    "external_links",
+    "post_url",
+  ];
+
+  const escapeCell = (value) => {
+    const stringValue = String(value ?? "");
+    if (/[",\n]/.test(stringValue)) {
+      return `"${stringValue.replace(/"/g, "\"\"")}"`;
+    }
+    return stringValue;
+  };
+
+  return [
+    headers.join(","),
+    ...rows.map((row) => headers.map((header) => escapeCell(row[header])).join(",")),
+  ].join("\n");
+}
+
+function createCsvDownloadUrl(csv) {
+  return `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`;
+}
+
+async function openTabAndWait(url, active = false) {
+  const tab = await chrome.tabs.create({ url, active });
+  if (!tab.id) throw new Error("Chrome did not return a tab id.");
+  await waitForTabLoad(tab.id);
+  await delay(1500);
+  return tab;
+}
+
+async function drivePostPageForComments(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async () => {
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const normalize = (value) => String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+      const isVisible = (element) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const isScrollable = (element) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(element);
+        return /(auto|scroll)/i.test(style.overflowY || "") && element.scrollHeight > element.clientHeight + 120;
+      };
+
+      const clickMatchingButton = (tokens) => {
+        const candidates = Array.from(document.querySelectorAll("button, div[role='button'], a[role='button']"));
+        const button = candidates.find((candidate) => {
+          const label = normalize(candidate.textContent || candidate.getAttribute("aria-label") || candidate.getAttribute("title"));
+          return isVisible(candidate) && tokens.some((token) => label.includes(token));
+        });
+        if (button) button.click();
+        return Boolean(button);
+      };
+
+      const findCommentsScroller = () => {
+        const permalink = document.querySelector("a[href*='/p/'][href*='/c/']");
+        if (permalink) {
+          let current = permalink.parentElement;
+          while (current) {
+            if (isScrollable(current)) return current;
+            current = current.parentElement;
+          }
+        }
+
+        return Array.from(document.querySelectorAll("div, section, main, article")).find(isScrollable) || document.scrollingElement || document.documentElement;
+      };
+
+      window.scrollTo({ top: 0, behavior: "instant" });
+      await delay(900);
+
+      const scroller = findCommentsScroller();
+
+      for (let index = 0; index < 18; index += 1) {
+        clickMatchingButton([
+          "more comments",
+          "voir plus de commentaires",
+          "view all comments",
+          "load more comments",
+          "load more",
+          "plus de commentaires",
+        ]);
+        if (scroller instanceof HTMLElement) {
+          scroller.scrollTop = scroller.scrollHeight;
+        } else {
+          window.scrollBy({ top: 900, behavior: "instant" });
+        }
+        await delay(1200);
+      }
+
+      window.scrollTo({ top: 0, behavior: "instant" });
+    },
+  });
+}
+
+async function fallbackCollectCommentsFromDom(tabId, postUrl) {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [postUrl],
+    func: (currentPostUrl) => {
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const escapeRegex = (value) => String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const isControlText = (value) => /^(reply|repondre|répondre|view translation|voir la traduction|like|j'aime|j’aime|verified|verifie|vérifié)$/i.test(value);
+      const isRelativeDate = (value) => /^\d+\s*(s|sec|min|h|d|j|w|sem|sem\.|wk|mo)$/i.test(value);
+      const items = [];
+      const seenPermalinks = new Set();
+      const permalinkLinks = Array.from(document.querySelectorAll("a[href*='/p/'][href*='/c/']"));
+
+      permalinkLinks.forEach((permalinkLink) => {
+        const permalink = permalinkLink.href;
+        if (!permalink || seenPermalinks.has(permalink)) return;
+
+        const row =
+          permalinkLink.closest("button") ||
+          permalinkLink.parentElement?.closest("div[role='button']") ||
+          permalinkLink.closest("[role='button']") ||
+          permalinkLink.parentElement?.closest("div") ||
+          permalinkLink.parentElement;
+
+        if (!row) return;
+
+        const profileLink = Array.from(
+          row.querySelectorAll("a[href^='/'], a[href^='https://www.instagram.com/']")
+        ).find((candidate) => {
+          const href = candidate.getAttribute("href") || "";
+          if (!href) return false;
+          if (href.includes("/p/") || href.includes("/reel/") || href.includes("/explore/") || href.includes("/stories/")) {
+            return false;
+          }
+          return true;
+        });
+
+        if (!profileLink) return;
+
+        const username = normalize((profileLink.getAttribute("href") || profileLink.textContent || "").split("/").filter(Boolean)[0]);
+        if (!username || username.length > 40) return;
+        const rowText = normalize(row.textContent);
+        const headingText = normalize(
+          row.querySelector("h3, header, [role='heading']")?.textContent ||
+          profileLink.textContent ||
+          ""
+        );
+        const name = normalize(
+          headingText
+            .replace(new RegExp(`^${escapeRegex(username)}\\b`, "i"), "")
+            .replace(/\b(verified|verifie|vérifié)\b/gi, "")
+        );
+        const isVerified = /\b(verified|verifie|vérifié)\b/i.test(headingText) || /\b(verified|verifie|vérifié)\b/i.test(rowText);
+
+        const baseCandidates = Array.from(row.querySelectorAll("span, h3"))
+          .map((element) => normalize(element.textContent))
+          .filter(Boolean)
+          .filter((text) => text !== username)
+          .filter((text) => text !== normalize(permalinkLink.textContent))
+          .filter((text) => !isControlText(text))
+          .filter((text) => !isRelativeDate(text))
+          .filter((text) => !/(?:\d+\s+)?j['’]aime$/i.test(text))
+          .filter((text) => !/^\d+\s+likes?$/i.test(text))
+          .filter((text) => !text.startsWith(`${username} `));
+
+        const strictComment = baseCandidates
+          .filter((text) => text !== headingText)
+          .filter((text) => text !== name)
+          .filter((text) => !/\b(verified|verifie|vérifié)\b/i.test(text))
+          .sort((a, b) => b.length - a.length)[0] || "";
+
+        const looseComment = baseCandidates
+          .sort((a, b) => b.length - a.length)[0] || "";
+
+        let commentText = strictComment || looseComment;
+
+        if (!commentText) {
+          commentText = rowText
+            .replace(new RegExp(`^${escapeRegex(username)}\\b`, "i"), "")
+            .replace(/\b(verified|verifie|vérifié)\b/gi, "")
+            .replace(/\b\d+\s*(?:sem|w|d|j|min|h|wk|mo)\b/gi, "")
+            .replace(/\b\d+\s+(?:j['’]aime|likes?)\b/gi, "")
+            .replace(/\b(répondre|reply|voir la traduction|j['’]aime|like)\b/gi, "")
+            .replace(/\s+/g, " ")
+            .trim();
+        }
+
+        if (!commentText) {
+          commentText = "[comment missing]";
+        }
+
+        seenPermalinks.add(permalink);
+
+        items.push({
+          source_type: "comments",
+          username,
+          name,
+          profile_url: `https://www.instagram.com/${username}/`,
+          is_verified: isVerified,
+          comment_text: commentText,
+          comment_date: normalize(permalinkLink.textContent),
+          post_url: currentPostUrl,
+        });
+      });
+
+      return {
+        items,
+        debug: {
+          permalinkCount: permalinkLinks.length,
+          itemCount: items.length,
+          bodyTextLength: normalize(document.body?.innerText || "").length,
+        },
+      };
+    },
+  });
+
+  return result?.result ?? { items: [], debug: { permalinkCount: 0, itemCount: 0, bodyTextLength: 0 } };
+}
+
+function resolveProfileWaiter(username, profile) {
+  if (!activeScrapeRuntime) return;
+
+  const key = normalizeText(username);
+  const waiter = activeScrapeRuntime.profileWaiters.get(key);
+  if (!waiter) return;
+
+  clearTimeout(waiter.timeoutId);
+  activeScrapeRuntime.profileWaiters.delete(key);
+  waiter.resolve(profile);
+}
+
+async function waitForProfileNetworkData(username) {
+  if (!activeScrapeRuntime) return null;
+
+  const key = normalizeText(username);
+  const cached = activeScrapeRuntime.profilesByUsername.get(key);
+  if (cached) return cached;
+
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => {
+      if (activeScrapeRuntime) {
+        activeScrapeRuntime.profileWaiters.delete(key);
+      }
+      resolve(null);
+    }, SCRAPE_PROFILE_TIMEOUT_MS);
+
+    activeScrapeRuntime.profileWaiters.set(key, { resolve, timeoutId });
+  });
+}
+
+async function fallbackProfileFromDom(tabId) {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const description = document.querySelector('meta[property="og:description"]')?.content || "";
+      const counts = description.match(/([\d.,]+)\s+Followers?.*?([\d.,]+)\s+Following.*?([\d.,]+)\s+Posts?/i);
+      const bioNode = Array.from(document.querySelectorAll("header section span, header section h1"))
+        .find((node) => {
+          const text = (node.textContent || "").trim();
+          return text && !/^posts?$|^followers?$|^following$/i.test(text);
+        });
+
+      const parseCount = (raw) => {
+        if (!raw) return null;
+        const cleaned = raw.replace(/[^\d.,]/g, "").replace(/,/g, "");
+        const value = Number(cleaned);
+        return Number.isFinite(value) ? value : null;
+      };
+
+      return {
+        name: (document.querySelector("header section h1")?.textContent || document.querySelector('meta[property="og:title"]')?.content || "").trim(),
+        bio: (bioNode?.textContent || "").trim(),
+        followers_count: parseCount(counts?.[1]),
+        posts_count: parseCount(counts?.[3]),
+        is_private: null,
+        is_verified: null,
+        is_business_account: null,
+        external_links: Array.from(document.querySelectorAll("a[href^='http']")).map((link) => link.href).join(" | "),
+      };
+    },
+  });
+
+  return result?.result ?? null;
+}
+
+async function openProfileListModal(tabId, sourceType) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [sourceType],
+    func: async (activeSourceType) => {
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const normalize = (value) => String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+      const isVisible = (element) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+
+      const matchesSource = (label) => {
+        if (activeSourceType === "followers") {
+          return label.includes("followers") || label.includes("abonn");
+        }
+        return (
+          label.includes("following") ||
+          label.includes("suivi") ||
+          label.includes("followed")
+        );
+      };
+
+      let trigger = null;
+      const startedAt = Date.now();
+      while (!trigger && Date.now() - startedAt < 15000) {
+        const candidates = Array.from(document.querySelectorAll("a, button, span, div"));
+        trigger = candidates.find((candidate) => {
+          const text = normalize(candidate.textContent || candidate.getAttribute("aria-label"));
+          if (!text || !matchesSource(text) || !isVisible(candidate)) return false;
+          return candidate.closest("header, section, main") != null;
+        });
+        if (!trigger) {
+          await delay(300);
+        }
+      }
+
+      if (!trigger) {
+        throw new Error(`Could not find the ${activeSourceType} trigger on the profile.`);
+      }
+
+      trigger.click();
+
+      const modalStartedAt = Date.now();
+      while (Date.now() - modalStartedAt < 10000) {
+        const dialog = document.querySelector("div[role='dialog']");
+        if (dialog && isVisible(dialog)) {
+          return;
+        }
+        await delay(250);
+      }
+
+      throw new Error(`The ${activeSourceType} modal did not open.`);
+    },
+  });
+}
+
+async function collectProfileListFromDom(tabId, sourceType, maxLeads) {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    args: [sourceType, maxLeads],
+    func: async (activeSourceType, limit) => {
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const normalize = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const isVisible = (element) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const isProfileHref = (href) => {
+        if (!href) return false;
+        const value = String(href);
+        if (value.startsWith("/")) {
+          return !/^\/(?:p|reel|tv|stories|explore|direct)\//i.test(value);
+        }
+        return /^https:\/\/www\.instagram\.com\/(?!p\/|reel\/|tv\/|stories\/|explore\/|direct\/)/i.test(value);
+      };
+      const getUsernameFromHref = (href) => {
+        const raw = String(href || "");
+        if (!raw) return "";
+        const normalized = raw.startsWith("/")
+          ? raw
+          : raw.replace(/^https:\/\/www\.instagram\.com/i, "");
+        return normalized.split("/").filter(Boolean)[0] || "";
+      };
+
+      const dialog = document.querySelector("div[role='dialog']");
+      if (!dialog || !isVisible(dialog)) {
+        throw new Error(`${activeSourceType} modal is not open.`);
+      }
+
+      const listRoot = Array.from(dialog.querySelectorAll("div"))
+        .find((node) => node.scrollHeight > node.clientHeight + 120) || dialog;
+
+      const collected = new Map();
+      let idlePasses = 0;
+      let lastCount = 0;
+
+      const collectVisibleRows = () => {
+        const anchors = Array.from(dialog.querySelectorAll("a[href]"))
+          .filter((anchor) => isVisible(anchor))
+          .filter((anchor) => isProfileHref(anchor.getAttribute("href")));
+
+        anchors.forEach((anchor) => {
+          const username = normalize(getUsernameFromHref(anchor.getAttribute("href") || anchor.href)).replace(/^@+/, "");
+          if (!username || collected.has(username)) return;
+
+          const row = anchor.closest("li, div[role='button'], button, article, div");
+          const textNodes = row
+            ? Array.from(row.querySelectorAll("span, div"))
+                .map((node) => normalize(node.textContent))
+                .filter(Boolean)
+            : [];
+          const name = textNodes.find((text) => text && text !== username && !/^suivre$/i.test(text) && !/^following$/i.test(text)) || "";
+
+          collected.set(username, {
+            source_type: activeSourceType,
+            username,
+            name,
+            profile_url: `https://www.instagram.com/${username}/`,
+            comment_text: "",
+            comment_date: "",
+            post_url: "",
+            is_verified: "",
+          });
+        });
+      };
+
+      for (let step = 0; step < 80; step += 1) {
+        collectVisibleRows();
+        if (collected.size >= limit) break;
+
+        if (collected.size === lastCount) {
+          idlePasses += 1;
+        } else {
+          idlePasses = 0;
+          lastCount = collected.size;
+        }
+
+        if (idlePasses >= 4) break;
+
+        if (listRoot instanceof HTMLElement) {
+          listRoot.scrollTop = Math.min(listRoot.scrollHeight, listRoot.scrollTop + Math.max(600, listRoot.clientHeight - 120));
+        } else {
+          dialog.scrollBy({ top: 700, behavior: "instant" });
+        }
+
+        await delay(900);
+      }
+
+      return {
+        items: Array.from(collected.values()).slice(0, limit),
+        debug: {
+          scannedCount: collected.size,
+          idlePasses,
+        },
+      };
+    },
+  });
+
+  return result?.result ?? { items: [], debug: { scannedCount: 0, idlePasses: 0 } };
+}
+
+async function enrichLead(lead, index, total) {
+  ensureScrapeNotStopped();
+  await setScrapeCursor({
+    phase: "enriching",
+    currentUsername: lead.username,
+    collectedCount: activeScrapeRuntime?.collectedLeadsByUsername.size ?? 0,
+    enrichedCount: index,
+    totalToEnrich: total,
+  });
+  await appendScrapeLog(`Enriching @${lead.username} (${index + 1}/${total})…`);
+
+  const jitter = 5000 + Math.floor(Math.random() * 3000);
+  const tab = await openTabAndWait(lead.profile_url, false);
+  if (!activeScrapeRuntime) throw new Error("Scrape stopped.");
+  activeScrapeRuntime.profileTabId = tab.id;
+
+  let profile = await waitForProfileNetworkData(lead.username);
+  if (!profile) {
+    await appendScrapeLog(`Network profile data missing for @${lead.username}; using DOM fallback.`);
+    profile = await fallbackProfileFromDom(tab.id);
+  }
+
+  await chrome.tabs.remove(tab.id).catch(() => {});
+  if (activeScrapeRuntime?.profileTabId === tab.id) {
+    activeScrapeRuntime.profileTabId = null;
+  }
+
+  await delay(jitter);
+
+  return {
+    ...lead,
+    name: profile?.name ?? lead.name ?? "",
+    bio: profile?.bio ?? "",
+    followers_count: profile?.followers_count ?? "",
+    posts_count: profile?.posts_count ?? "",
+    is_private: profile?.is_private ?? "",
+    is_verified: profile?.is_verified ?? lead.is_verified ?? "",
+    is_business_account: profile?.is_business_account ?? "",
+    external_links: profile?.external_links ?? "",
+  };
+}
+
+async function collectCommentsForScrape(postUrl) {
+  const tab = await openTabAndWait(postUrl, false);
+  if (!activeScrapeRuntime) throw new Error("Scrape stopped.");
+
+  activeScrapeRuntime.postTabId = tab.id;
+  await setScrapeCursor({ phase: "collecting", collectedCount: 0, enrichedCount: 0 });
+  await appendScrapeLog("Post tab opened. Waiting for Instagram comment payloads…");
+
+  await drivePostPageForComments(tab.id);
+  await delay(2500);
+
+  let domPayload = { items: [], debug: { permalinkCount: 0, itemCount: 0, bodyTextLength: 0 } };
+  for (let attempt = 1; attempt <= 8; attempt += 1) {
+    domPayload = await fallbackCollectCommentsFromDom(tab.id, postUrl);
+    if (domPayload.items.length > 0 || domPayload.debug.permalinkCount > 0) {
+      break;
+    }
+    await appendScrapeLog(`DOM probe ${attempt}/8: 0 permalink found, retrying…`);
+    await delay(1000);
+  }
+
+  const domLeads = domPayload.items;
+  await appendScrapeLog(
+    `DOM collection captured ${domLeads.length} visible commenter(s) ` +
+    `(permalinks: ${domPayload.debug.permalinkCount}, bodyTextLength: ${domPayload.debug.bodyTextLength}).`
+  );
+
+  const networkLeads = Array.from(activeScrapeRuntime.collectedLeadsByUsername.values());
+  if (networkLeads.length) {
+    await appendScrapeLog(`Network interception captured ${networkLeads.length} commenter candidate(s).`);
+  } else {
+    await appendScrapeLog("No reliable network comment payload captured for this post.");
+  }
+
+  const leads = dedupeLeadsByUsername([...domLeads, ...networkLeads]);
+
+  await chrome.tabs.remove(tab.id).catch(() => {});
+  if (activeScrapeRuntime?.postTabId === tab.id) {
+    activeScrapeRuntime.postTabId = null;
+  }
+
+  await setScrapeCursor({ phase: "collected", collectedCount: leads.length, enrichedCount: 0 });
+  await appendScrapeLog(`Collected ${leads.length} unique commenter(s).`);
+  return leads;
+}
+
+async function collectProfileListForScrape(profileUrl, sourceType, maxLeads) {
+  const tab = await openTabAndWait(profileUrl, false);
+  if (!activeScrapeRuntime) throw new Error("Scrape stopped.");
+
+  activeScrapeRuntime.postTabId = tab.id;
+  await setScrapeCursor({ phase: "collecting", collectedCount: 0, enrichedCount: 0 });
+  await appendScrapeLog(`Profile tab opened. Opening ${sourceType} modal…`);
+
+  await openProfileListModal(tab.id, sourceType);
+  await delay(1200);
+
+  const domPayload = await collectProfileListFromDom(tab.id, sourceType, maxLeads);
+  domPayload.items.forEach((lead) => {
+    activeScrapeRuntime.collectedLeadsByUsername.set(normalizeText(lead.username), {
+      ...lead,
+      post_url: profileUrl,
+    });
+  });
+
+  await appendScrapeLog(
+    `DOM collection captured ${domPayload.items.length} visible ${sourceType} profile(s) ` +
+    `(scanned: ${domPayload.debug.scannedCount}, idle passes: ${domPayload.debug.idlePasses}).`
+  );
+
+  await chrome.tabs.remove(tab.id).catch(() => {});
+  if (activeScrapeRuntime?.postTabId === tab.id) {
+    activeScrapeRuntime.postTabId = null;
+  }
+
+  const leads = dedupeLeadsByUsername(Array.from(activeScrapeRuntime.collectedLeadsByUsername.values())).slice(0, maxLeads);
+  await setScrapeCursor({ phase: "collected", collectedCount: leads.length, enrichedCount: 0 });
+  await appendScrapeLog(`Collected ${leads.length} unique ${sourceType} profile(s).`);
+  return leads;
+}
+
+async function runScrapeJob(payload) {
+  if (activeScrapeRuntime?.job && !activeScrapeRuntime.stopRequested) {
+    throw new Error("A scrape is already running.");
+  }
+
+  const filters = buildScrapeFilters(payload);
+  const job = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    startedAt: new Date().toISOString(),
+    sourceType: filters.sourceType,
+    postUrl: filters.postUrl,
+  };
+
+  activeScrapeRuntime = createScrapeRuntime(job);
+  await initializeScrapeState(job, filters);
+  await appendScrapeLog(`Starting ${filters.sourceType} scrape job ${job.id} for ${filters.postUrl}`);
+
+  try {
+    const rawLeads = filters.sourceType === "comments"
+      ? await collectCommentsForScrape(filters.postUrl)
+      : await collectProfileListForScrape(filters.postUrl, filters.sourceType, filters.maxLeads);
+    ensureScrapeNotStopped();
+
+    const minLengthLeads = filters.sourceType === "comments"
+      ? rawLeads.filter((lead) => (lead.comment_text || "").trim().length >= filters.minimumCommentLength)
+      : rawLeads;
+    if (filters.sourceType === "comments") {
+      await appendScrapeLog(`${minLengthLeads.length} lead(s) remain after minimum comment length filter.`);
+    }
+
+    const finalResults = [];
+
+    if (!filters.profileEnrichment) {
+      const filtered = minLengthLeads.filter((lead) => passesLeadFilters(lead, filters, false)).slice(0, filters.maxLeads);
+      filtered.forEach((lead) => {
+        finalResults.push({
+          ...lead,
+          source_type: lead.source_type ?? filters.sourceType,
+          name: lead.name ?? "",
+          bio: "",
+          followers_count: "",
+          posts_count: "",
+          is_private: "",
+          is_verified: lead.is_verified ?? "",
+          is_business_account: "",
+          external_links: "",
+        });
+      });
+      await setScrapeResults(finalResults);
+      await setScrapeCursor({
+        phase: "filtered",
+        collectedCount: rawLeads.length,
+        enrichedCount: 0,
+        keptCount: finalResults.length,
+        totalToEnrich: 0,
+      });
+    } else {
+      for (let index = 0; index < minLengthLeads.length; index += 1) {
+        ensureScrapeNotStopped();
+        const enrichedLead = await enrichLead(minLengthLeads[index], index, minLengthLeads.length);
+        if (passesLeadFilters(enrichedLead, filters, true)) {
+          finalResults.push({
+            ...enrichedLead,
+            source_type: enrichedLead.source_type ?? filters.sourceType,
+          });
+          await setScrapeResults(finalResults);
+          await setScrapeCursor({
+            phase: "enriching",
+            currentUsername: enrichedLead.username,
+            collectedCount: rawLeads.length,
+            enrichedCount: index + 1,
+            keptCount: finalResults.length,
+            totalToEnrich: minLengthLeads.length,
+          });
+          await appendScrapeLog(`Lead kept: @${enrichedLead.username} (${finalResults.length}/${filters.maxLeads})`);
+        } else {
+          await setScrapeCursor({
+            phase: "enriching",
+            currentUsername: enrichedLead.username,
+            collectedCount: rawLeads.length,
+            enrichedCount: index + 1,
+            keptCount: finalResults.length,
+            totalToEnrich: minLengthLeads.length,
+          });
+          await appendScrapeLog(`Lead filtered out after enrichment: @${enrichedLead.username}`);
+        }
+
+        if (finalResults.length >= filters.maxLeads) {
+          break;
+        }
+      }
+    }
+
+    if (!filters.profileEnrichment && finalResults.length < filters.maxLeads) {
+      await appendScrapeLog(`Lead filter result: ${finalResults.length} lead(s) kept.`);
+    }
+
+    await finalizeScrapeState("done", finalResults);
+    await appendScrapeLog(`Scrape completed with ${finalResults.length} lead(s).`);
+    activeScrapeRuntime = null;
+  } catch (error) {
+    const wasStopped = activeScrapeRuntime?.stopRequested || error.message === "Scrape stopped.";
+    await cleanupActiveScrapeTabs();
+    if (wasStopped) {
+      await setScrapeStatus("stopped");
+      await appendScrapeLog("Scrape stopped before completion.");
+    } else {
+      await setScrapeStatus("error");
+      await setScrapeCursor({ phase: "error", error: error.message });
+      await appendScrapeLog(`Scrape failed: ${error.message}`);
+    }
+    activeScrapeRuntime = null;
+    if (!wasStopped) {
+      throw error;
+    }
+  }
 }
 
 // ── Auto-fetch ────────────────────────────────────────────────
@@ -904,6 +2027,131 @@ async function callMarkDone(row) {
     await appendRunLog("mark-done", `Error: ${e.message}`);
   }
 }
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "SCRAPE_NETWORK_DATA") {
+    (async () => {
+      try {
+        if (!activeScrapeRuntime) {
+          sendResponse({ ok: true, ignored: true });
+          return;
+        }
+
+        const tabId = sender.tab?.id;
+        const isActiveTab =
+          tabId != null &&
+          (tabId === activeScrapeRuntime.postTabId || tabId === activeScrapeRuntime.profileTabId);
+
+        if (!isActiveTab) {
+          sendResponse({ ok: true, ignored: true });
+          return;
+        }
+
+        const payload = message.payload || {};
+
+        if (tabId === activeScrapeRuntime.postTabId && activeScrapeRuntime.job.sourceType === "comments") {
+          const leads = extractCommentsFromNetworkPayload(payload.data, activeScrapeRuntime.job.postUrl);
+          if (leads.length) {
+            leads.forEach((lead) => {
+              const key = normalizeText(lead.username);
+              if (!activeScrapeRuntime.collectedLeadsByUsername.has(key)) {
+                activeScrapeRuntime.collectedLeadsByUsername.set(key, lead);
+              }
+            });
+            await setScrapeCursor({
+              phase: "collecting",
+              collectedCount: activeScrapeRuntime.collectedLeadsByUsername.size,
+              enrichedCount: 0,
+            });
+          }
+        }
+
+        if (tabId === activeScrapeRuntime.profileTabId) {
+          const urlMatch = String(payload.url || "").match(/users\/web_profile_info\/?\?username=([^&]+)/i);
+          const expectedUsername = decodeURIComponent(urlMatch?.[1] || "");
+          const profile = extractProfileFromNetworkPayload(payload.data, expectedUsername);
+          if (profile && expectedUsername) {
+            const key = normalizeText(expectedUsername);
+            activeScrapeRuntime.profilesByUsername.set(key, profile);
+            resolveProfileWaiter(expectedUsername, profile);
+          }
+        }
+
+        sendResponse({ ok: true });
+      } catch (error) {
+        sendResponse({ ok: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "START_SCRAPE") {
+    try {
+      buildScrapeFilters(message.payload || {});
+      sendResponse({ ok: true });
+      runScrapeJob(message.payload || {}).catch((error) => {
+        console.error(`[IG Follow-Up][scrape] ${error.message}`);
+      });
+    } catch (error) {
+      sendResponse({ ok: false, error: error.message });
+    }
+    return true;
+  }
+
+  if (message?.type === "STOP_SCRAPE") {
+    (async () => {
+      try {
+        await stopActiveScrape("manual stop");
+        sendResponse({ ok: true });
+      } catch (error) {
+        sendResponse({ ok: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  if (message?.type === "GET_SCRAPE_STATUS") {
+    getScrapeState()
+      .then((state) => sendResponse({ ok: true, ...state }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "GET_SCRAPE_LOGS") {
+    chrome.storage.local.get("scrapeLogs")
+      .then(({ scrapeLogs = [] }) => sendResponse({ ok: true, logs: scrapeLogs }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
+  }
+
+  if (message?.type === "DOWNLOAD_SCRAPE_CSV") {
+    (async () => {
+      try {
+        const { scrapeResults = [], scrapeStatus } = await chrome.storage.local.get(["scrapeResults", "scrapeStatus"]);
+        if (!scrapeResults.length) {
+          throw new Error("No scrape results available yet.");
+        }
+
+        const csv = createCsvContent(scrapeResults);
+        const url = createCsvDownloadUrl(csv);
+        const statusSuffix = scrapeStatus === "done" ? "complete" : scrapeStatus || "partial";
+        const filename = `instagram-leads-${statusSuffix}-${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
+
+        await chrome.downloads.download({
+          url,
+          filename,
+          saveAs: true,
+        });
+        sendResponse({ ok: true, filename });
+      } catch (error) {
+        sendResponse({ ok: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
+  return false;
+});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "CRM_INBOX_DATA") {

@@ -40,6 +40,34 @@ const submitButton = document.getElementById("submit-button");
 const logsButton = document.getElementById("logs-button");
 const statusNode = document.getElementById("status");
 const logsNode = document.getElementById("logs");
+const senderMode = document.getElementById("sender-mode");
+const scraperMode = document.getElementById("scraper-mode");
+const modeSenderButton = document.getElementById("mode-sender-button");
+const modeScraperButton = document.getElementById("mode-scraper-button");
+
+const scrapeForm = document.getElementById("scrape-form");
+const scrapeSourceButtons = Array.from(document.querySelectorAll("[data-source-type]"));
+const scrapeTargetLabel = document.getElementById("scrape-target-label");
+const scrapePostUrlInput = document.getElementById("scrape-post-url");
+const scrapeIncludeInput = document.getElementById("scrape-include-keywords");
+const scrapeExcludeInput = document.getElementById("scrape-exclude-keywords");
+const scrapeMinLengthField = document.getElementById("scrape-min-length-field");
+const scrapeMinLengthInput = document.getElementById("scrape-min-length");
+const scrapeMaxLeadsInput = document.getElementById("scrape-max-leads");
+const scrapeProfileEnrichmentInput = document.getElementById("scrape-profile-enrichment");
+const startScrapeButton = document.getElementById("start-scrape-button");
+const stopScrapeButton = document.getElementById("stop-scrape-button");
+const scrapeSummary = document.getElementById("scrape-summary");
+const scrapeCursor = document.getElementById("scrape-cursor");
+const scrapeLogsButton = document.getElementById("scrape-logs-button");
+const downloadScrapeButton = document.getElementById("download-scrape-button");
+const scrapeStatusNode = document.getElementById("scrape-status");
+const scrapeLogsNode = document.getElementById("scrape-logs");
+const scrapeCollectedCount = document.getElementById("scrape-collected-count");
+const scrapeReadyCount = document.getElementById("scrape-ready-count");
+const scrapeResultsPreview = document.getElementById("scrape-results-preview");
+const scrapeResultsBody = document.getElementById("scrape-results-body");
+const scrapePreviewColumnLabel = document.getElementById("scrape-preview-column-label");
 
 // Auto-fetch DOM refs
 const autofetchBadge    = document.getElementById("autofetch-badge");
@@ -70,9 +98,73 @@ function setStatus(message, state = "idle") {
   statusNode.dataset.state = state;
 }
 
+function setScrapeStatus(message, state = "idle") {
+  scrapeStatusNode.textContent = message;
+  scrapeStatusNode.dataset.state = state;
+}
+
+function setMode(mode) {
+  const isSender = mode === "sender";
+  senderMode.hidden = !isSender;
+  scraperMode.hidden = isSender;
+  modeSenderButton.classList.toggle("is-active", isSender);
+  modeScraperButton.classList.toggle("is-active", !isSender);
+}
+
 function sanitizeHandle(rawHandle) {
   return rawHandle.trim().replace(/^@+/, "").replace(/\/+$/, "");
 }
+
+const SCRAPE_SOURCE_CONFIG = {
+  comments: {
+    label: "Post URL",
+    placeholder: "https://www.instagram.com/p/...",
+    previewLabel: "Comment",
+    statusLabel: "comment",
+  },
+  followers: {
+    label: "Profile URL or handle",
+    placeholder: "instagram or https://www.instagram.com/instagram/",
+    previewLabel: "Name",
+    statusLabel: "profile",
+  },
+  following: {
+    label: "Profile URL or handle",
+    placeholder: "instagram or https://www.instagram.com/instagram/",
+    previewLabel: "Name",
+    statusLabel: "profile",
+  },
+};
+
+let activeScrapeSourceType = "comments";
+
+function getScrapeSourceConfig(sourceType) {
+  return SCRAPE_SOURCE_CONFIG[sourceType] || SCRAPE_SOURCE_CONFIG.comments;
+}
+
+function setScrapeSourceType(sourceType) {
+  activeScrapeSourceType = SCRAPE_SOURCE_CONFIG[sourceType] ? sourceType : "comments";
+  const config = getScrapeSourceConfig(activeScrapeSourceType);
+  scrapeTargetLabel.textContent = config.label;
+  scrapePostUrlInput.placeholder = config.placeholder;
+  scrapePreviewColumnLabel.textContent = config.previewLabel;
+  scrapeSourceButtons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.sourceType === activeScrapeSourceType);
+  });
+  scrapeMinLengthField.hidden = activeScrapeSourceType !== "comments";
+}
+
+scrapeSourceButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    setScrapeSourceType(button.dataset.sourceType || "comments");
+  });
+});
+
+setScrapeSourceType("comments");
+
+modeSenderButton.addEventListener("click", () => setMode("sender"));
+modeScraperButton.addEventListener("click", () => setMode("scraper"));
+setMode("sender");
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -182,6 +274,7 @@ async function loadBatchStatus() {
 }
 
 loadBatchStatus();
+loadScrapeStatus();
 
 // Settings button → opens settings.html in a new tab
 settingsButton.addEventListener("click", () => {
@@ -314,6 +407,93 @@ stopBatchButton.addEventListener("click", async () => {
   }
 });
 
+scrapeForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+
+  startScrapeButton.disabled = true;
+  setScrapeStatus(`Starting ${activeScrapeSourceType} scrape…`);
+
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "START_SCRAPE",
+      payload: {
+        postUrl: scrapePostUrlInput.value.trim(),
+        sourceType: activeScrapeSourceType,
+        includeKeywords: scrapeIncludeInput.value.trim(),
+        excludeKeywords: scrapeExcludeInput.value.trim(),
+        minimumCommentLength: scrapeMinLengthInput.value,
+        maxLeads: scrapeMaxLeadsInput.value,
+        profileEnrichment: scrapeProfileEnrichmentInput.checked,
+      }
+    });
+
+    if (!response?.ok) {
+      setScrapeStatus(response?.error ?? "Failed to start scrape.", "error");
+      startScrapeButton.disabled = false;
+      return;
+    }
+
+    renderScrapeStatus({
+      scrapeStatus: "running",
+      scrapeResults: [],
+      scrapeFilters: { sourceType: activeScrapeSourceType },
+      scrapeCursor: { phase: "starting", collectedCount: 0, enrichedCount: 0 },
+    });
+    setScrapeStatus(`${activeScrapeSourceType} scrape started. You can close the popup and reopen it later.`, "success");
+    await loadScrapeStatus();
+  } catch (error) {
+    setScrapeStatus(error.message ?? "Failed to start scrape.", "error");
+    startScrapeButton.disabled = false;
+  }
+});
+
+stopScrapeButton.addEventListener("click", async () => {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "STOP_SCRAPE" });
+    if (!response?.ok) {
+      setScrapeStatus(response?.error ?? "Failed to stop scrape.", "error");
+      return;
+    }
+    setScrapeStatus("Scrape stopped.", "success");
+    await loadScrapeStatus();
+  } catch (error) {
+    setScrapeStatus(error.message ?? "Failed to stop scrape.", "error");
+  }
+});
+
+scrapeLogsButton.addEventListener("click", async () => {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "GET_SCRAPE_LOGS" });
+    if (!response?.ok) {
+      setScrapeStatus(response?.error ?? "Could not load scrape logs.", "error");
+      return;
+    }
+
+    const lines = response.logs.length
+      ? response.logs.map((entry) => `${entry.at} ${entry.message}`)
+      : ["No scrape logs yet."];
+
+    scrapeLogsNode.hidden = false;
+    scrapeLogsNode.textContent = lines.join("\n");
+    setScrapeStatus("Scrape logs loaded.");
+  } catch (error) {
+    setScrapeStatus(error.message ?? "Could not load scrape logs.", "error");
+  }
+});
+
+downloadScrapeButton.addEventListener("click", async () => {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "DOWNLOAD_SCRAPE_CSV" });
+    if (!response?.ok) {
+      setScrapeStatus(response?.error ?? "Could not download CSV.", "error");
+      return;
+    }
+    setScrapeStatus(`CSV ready: ${response.filename}`, "success");
+  } catch (error) {
+    setScrapeStatus(error.message ?? "Could not download CSV.", "error");
+  }
+});
+
 // Countdown timer — reads chrome.alarms + storage directly (no background round-trip)
 let countdownInterval = null;
 
@@ -360,7 +540,101 @@ function stopCountdown() {
   countdownDisplay.textContent = "";
 }
 
-window.addEventListener("unload", () => { stopCountdown(); stopAutoFetchCountdown(); stopCrmCountdown(); });
+function renderScrapeStatus(state = {}) {
+  const scrapeStatus = state.scrapeStatus ?? null;
+  const scrapeResults = state.scrapeResults ?? [];
+  const cursor = state.scrapeCursor ?? {};
+  const filters = state.scrapeFilters ?? {};
+  const sourceType = filters.sourceType || activeScrapeSourceType;
+  const sourceConfig = getScrapeSourceConfig(sourceType);
+  const collectedCount = cursor.collectedCount ?? 0;
+  const readyCount = scrapeResults.length;
+
+  scrapeSummary.textContent =
+    `Status: ${scrapeStatus ?? "idle"} — ${readyCount} ${sourceConfig.statusLabel}(s) ready`;
+
+  const cursorParts = [];
+  if (cursor.phase) cursorParts.push(`phase: ${cursor.phase}`);
+  if (cursor.currentUsername) cursorParts.push(`current: @${cursor.currentUsername}`);
+  if (cursor.collectedCount != null) cursorParts.push(`collected: ${cursor.collectedCount}`);
+  if (cursor.enrichedCount != null) cursorParts.push(`enriched: ${cursor.enrichedCount}`);
+  if (cursor.keptCount != null) cursorParts.push(`ready: ${cursor.keptCount}`);
+  if (cursor.totalToEnrich != null) cursorParts.push(`total: ${cursor.totalToEnrich}`);
+  if (cursor.error) cursorParts.push(`error: ${cursor.error}`);
+  scrapeCursor.textContent = cursorParts.join(" — ") || "No scrape running.";
+
+  scrapeCollectedCount.textContent = String(collectedCount);
+  scrapeReadyCount.textContent = String(readyCount);
+
+  scrapeResultsBody.innerHTML = "";
+  const previewRows = scrapeResults.slice(0, 12);
+  previewRows.forEach((lead) => {
+    const tr = document.createElement("tr");
+
+    const handleTd = document.createElement("td");
+    handleTd.textContent = `@${lead.username}`;
+
+    const previewTd = document.createElement("td");
+    const text = sourceType === "comments"
+      ? (lead.comment_text || "").trim()
+      : (lead.name || "").trim();
+    previewTd.textContent = text.length > 80 ? `${text.slice(0, 80)}…` : text || "—";
+
+    tr.appendChild(handleTd);
+    tr.appendChild(previewTd);
+    scrapeResultsBody.appendChild(tr);
+  });
+
+  if (scrapeResults.length > 12) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 2;
+    td.textContent = `… and ${scrapeResults.length - 12} more lead(s)`;
+    td.style.color = "#7a5c3e";
+    tr.appendChild(td);
+    scrapeResultsBody.appendChild(tr);
+  }
+
+  scrapeResultsPreview.hidden = scrapeResults.length === 0;
+  scrapePreviewColumnLabel.textContent = sourceConfig.previewLabel;
+
+  const isRunning = scrapeStatus === "running";
+  startScrapeButton.disabled = isRunning;
+  stopScrapeButton.disabled = !isRunning;
+  downloadScrapeButton.hidden = scrapeResults.length === 0;
+  downloadScrapeButton.textContent = scrapeStatus === "done" ? "Download latest CSV" : "Download partial CSV";
+}
+
+async function loadScrapeStatus() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "GET_SCRAPE_STATUS" });
+    if (!response?.ok) return;
+
+    renderScrapeStatus(response);
+
+    const filters = response.scrapeFilters || {};
+    setScrapeSourceType(filters.sourceType || "comments");
+    if (filters.postUrl) scrapePostUrlInput.value = filters.postUrl;
+    scrapeIncludeInput.value = (filters.includeKeywords || []).join(", ");
+    scrapeExcludeInput.value = (filters.excludeKeywords || []).join(", ");
+    scrapeMinLengthInput.value = String(filters.minimumCommentLength ?? 0);
+    scrapeMaxLeadsInput.value = String(filters.maxLeads ?? 30);
+    scrapeProfileEnrichmentInput.checked = Boolean(filters.profileEnrichment);
+  } catch (_) {
+    // ignore initial load issues
+  }
+}
+
+const scrapeStatusInterval = setInterval(() => {
+  loadScrapeStatus().catch(() => {});
+}, 2000);
+
+window.addEventListener("unload", () => {
+  stopCountdown();
+  stopAutoFetchCountdown();
+  stopCrmCountdown();
+  clearInterval(scrapeStatusInterval);
+});
 
 // ── CRM Sync controls ─────────────────────────────────────────
 const crmBadge        = document.getElementById("crm-badge");

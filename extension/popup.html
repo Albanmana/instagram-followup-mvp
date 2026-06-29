@@ -8,7 +8,20 @@
   </head>
   <body>
     <main class="app">
-      <h1>Test sender <button id="toggle-batch-button" type="button" class="text-button">CSV batch ↓</button><button id="settings-button" type="button" class="settings-button" title="Settings">⚙</button></h1>
+      <header class="app-header">
+        <div>
+          <h1>Instagram Follow-Up MVP</h1>
+          <p class="app-subtitle">Sender + lead scraper</p>
+        </div>
+        <button id="settings-button" type="button" class="settings-button" title="Settings">⚙</button>
+      </header>
+
+      <div class="mode-switch" role="tablist" aria-label="Mode switch">
+        <button id="mode-sender-button" type="button" class="mode-button is-active">Test sender</button>
+        <button id="mode-scraper-button" type="button" class="mode-button">Lead Scraper</button>
+      </div>
+
+      <section id="sender-mode">
 
       <section id="autofetch-section" class="autofetch-section">
         <div class="autofetch-row">
@@ -51,6 +64,10 @@
       </section>
 
       <section id="batch-section" class="batch-section">
+        <div class="section-title-row">
+          <span class="section-title">CSV batch</span>
+          <button id="toggle-batch-button" type="button" class="text-button">Toggle</button>
+        </div>
         <div id="csv-drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="Drop CSV file here or click to browse">
           <span class="drop-zone__label">Drop .csv here or <span class="drop-zone__link">browse</span></span>
           <input id="csv-file-input" type="file" accept=".csv" hidden />
@@ -101,6 +118,83 @@
 
       <p id="status" class="status" aria-live="polite">Ready.</p>
       <pre id="logs" class="logs" hidden></pre>
+      </section>
+
+      <section id="scraper-mode" class="scraper-mode" hidden>
+        <form id="scrape-form" class="form">
+          <fieldset class="source-switch" aria-label="Scrape source">
+            <button id="scrape-source-comments" type="button" class="source-button is-active" data-source-type="comments">Comments</button>
+            <button id="scrape-source-followers" type="button" class="source-button" data-source-type="followers">Followers</button>
+            <button id="scrape-source-following" type="button" class="source-button" data-source-type="following">Following</button>
+          </fieldset>
+
+          <label class="field">
+            <span id="scrape-target-label">Post URL</span>
+            <input id="scrape-post-url" type="text" placeholder="https://www.instagram.com/p/..." autocomplete="off" required />
+          </label>
+
+          <label class="field">
+            <span>Include keywords</span>
+            <input id="scrape-include-keywords" type="text" placeholder="coach, online coaching" />
+          </label>
+
+          <label class="field">
+            <span>Exclude keywords</span>
+            <input id="scrape-exclude-keywords" type="text" placeholder="agency, giveaway" />
+          </label>
+
+          <div class="scrape-grid">
+            <label id="scrape-min-length-field" class="field">
+              <span>Minimum comment length</span>
+              <input id="scrape-min-length" type="number" min="0" value="0" />
+            </label>
+
+            <label class="field">
+              <span>Max leads</span>
+              <input id="scrape-max-leads" type="number" min="1" value="30" />
+            </label>
+          </div>
+
+          <label class="checkbox-field">
+            <input id="scrape-profile-enrichment" type="checkbox" />
+            <span>Profile enrichment</span>
+          </label>
+
+          <div class="scrape-actions">
+            <button id="start-scrape-button" type="submit">Start scrape</button>
+            <button id="stop-scrape-button" type="button" class="secondary-button">Stop</button>
+          </div>
+
+          <div id="scrape-progress" class="scrape-progress">
+            <p id="scrape-summary" class="batch-summary">No scrape running.</p>
+            <p id="scrape-cursor" class="autofetch-countdown"></p>
+            <div class="scrape-stats">
+              <div class="scrape-stat-card">
+                <span class="scrape-stat-label">Collected</span>
+                <strong id="scrape-collected-count" class="scrape-stat-value">0</strong>
+              </div>
+              <div class="scrape-stat-card">
+                <span class="scrape-stat-label">Ready</span>
+                <strong id="scrape-ready-count" class="scrape-stat-value">0</strong>
+              </div>
+            </div>
+            <div id="scrape-results-preview" class="scrape-results-preview" hidden>
+              <table class="batch-table">
+                <thead><tr><th>Handle</th><th id="scrape-preview-column-label">Comment</th></tr></thead>
+                <tbody id="scrape-results-body"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="scrape-actions">
+            <button id="scrape-logs-button" type="button" class="secondary-button">Show scrape logs</button>
+            <button id="download-scrape-button" type="button" class="secondary-button" hidden>Download latest CSV</button>
+          </div>
+        </form>
+
+        <p id="scrape-status" class="status" aria-live="polite">Scraper ready.</p>
+        <pre id="scrape-logs" class="logs" hidden></pre>
+      </section>
     </main>
 
     <script src="popup.js"></script>
