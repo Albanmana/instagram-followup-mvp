@@ -233,6 +233,74 @@ async function sendTestMessage({ handle, message, has_gif, gif_query }) {
         }) || candidates.find((candidate) => isVisible(candidate));
       };
 
+      const findGifSearchInput = () => {
+        const candidates = Array.from(
+          document.querySelectorAll(
+            'input[aria-label="Rechercher dans GIPHY"], input[placeholder="Rechercher dans GIPHY"]'
+          )
+        );
+
+        return candidates.find((candidate) => isVisible(candidate)) || null;
+      };
+
+      const findVisibleGifTabs = () =>
+        Array.from(document.querySelectorAll('[role="tab"]')).filter((tab) => isVisible(tab));
+
+      const findGifPickerButton = () => {
+        const directButton = document.querySelector('button[aria-label="Choisir un GIF ou un sticker"]');
+        if (directButton && isVisible(directButton)) {
+          return directButton;
+        }
+
+        const icon = document.querySelector('[aria-label="Choisir un GIF ou un sticker"]');
+        const parentButton = icon?.closest('button,[role="button"],div[role="button"]');
+
+        if (parentButton && isVisible(parentButton)) {
+          return parentButton;
+        }
+
+        return null;
+      };
+
+      const findVisibleGifResultButtons = () =>
+        Array.from(
+          document.querySelectorAll(
+            'div[role="button"][aria-label^="Send Animated Image"], button[aria-label^="Send Animated Image"]'
+          )
+        )
+          .filter((button) => isVisible(button));
+
+      const findFirstGifResult = () => findVisibleGifResultButtons()[0] ?? null;
+
+      const clickFirstGifResult = async () => {
+        const button = await waitFor(findFirstGifResult, "GIF result", 8000).catch(() => null);
+
+        if (!button) {
+          sendLog("gif", "No GIF result found — skipping.");
+          return false;
+        }
+
+        button.scrollIntoView({ block: "center", inline: "center" });
+        await delay(200);
+
+        let freshButton = findFirstGifResult();
+        if (!freshButton) {
+          sendLog("gif", "GIF result disappeared before click. Retrying once.");
+          await delay(400);
+          freshButton = findFirstGifResult();
+        }
+
+        if (!freshButton) {
+          sendLog("gif", "GIF result still unavailable after retry — skipping.");
+          return false;
+        }
+
+        freshButton.click();
+        sendLog("gif", "GIF sent.");
+        await delay(800);
+        return true;
+      };
+
       sendLog("profile", `Visible action labels on page: ${getVisibleActionLabels().join(" | ")}`);
 
       const messageButton = await waitFor(
@@ -252,50 +320,59 @@ async function sendTestMessage({ handle, message, has_gif, gif_query }) {
       if (hasGif && gifQuery) {
         sendLog("gif", `Sending GIF: "${gifQuery}"`);
         const pickerBtn = await waitFor(
-          () => {
-            const btn = document.querySelector('button[aria-label="Choisir un GIF ou un sticker"]');
-            return btn && isVisible(btn) ? btn : null;
-          },
+          findGifPickerButton,
           "GIF picker button",
           5000
         ).catch(() => null);
 
         if (pickerBtn) {
+          sendLog("gif", "Step 1/3: opening sticker/GIF picker.");
           pickerBtn.click();
           await delay(800);
 
-          const gifTab =
-            Array.from(document.querySelectorAll('[role="tab"]'))
-              .find((el) => el.textContent?.trim().toUpperCase().includes("GIF"))
-            ?? document.querySelectorAll('[role="tab"]')[1];
-          gifTab?.click();
-          await delay(600);
+          let searchInput = findGifSearchInput();
 
-          const searchInput = await waitFor(
-            () => document.querySelector('input[aria-label="Rechercher dans GIPHY"]'),
+          if (!searchInput) {
+            const gifTabs = findVisibleGifTabs();
+            const gifTab =
+              gifTabs.find((tab) => normalize(tab.textContent).includes("gif"))
+              ?? gifTabs[1]
+              ?? null;
+
+            if (gifTab) {
+              sendLog("gif", "Step 2/3: switching to the GIPHY tab.");
+              gifTab.click();
+              await delay(600);
+            } else {
+              sendLog("gif", `No visible GIF tab found. Visible tabs: ${gifTabs.map((tab) => normalize(tab.textContent) || "<icon-only>").join(" | ")}`);
+            }
+          } else {
+            sendLog("gif", "Step 2/3: GIPHY tab already open.");
+          }
+
+          searchInput = await waitFor(
+            findGifSearchInput,
             "GIPHY search input",
             5000
           ).catch(() => null);
 
           if (searchInput) {
+            sendLog("gif", "Step 3/3: filling the GIPHY search input.");
+            searchInput.focus();
+            searchInput.click();
+            searchInput.select?.();
+
             const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+            setter.call(searchInput, "");
+            searchInput.dispatchEvent(new InputEvent("input", { bubbles: true, data: null, inputType: "deleteContentBackward" }));
             setter.call(searchInput, gifQuery);
-            searchInput.dispatchEvent(new Event("input", { bubbles: true }));
-            await delay(1500);
-
-            const firstGif = await waitFor(
-              () => document.querySelector('button[aria-label="Send Animated Image"]'),
-              "GIF result",
-              8000
-            ).catch(() => null);
-
-            if (firstGif) {
-              firstGif.click();
-              sendLog("gif", "GIF sent.");
-              await delay(800);
-            } else {
-              sendLog("gif", "No GIF result found — skipping.");
-            }
+            searchInput.dispatchEvent(new InputEvent("input", { bubbles: true, data: gifQuery, inputType: "insertText" }));
+            searchInput.dispatchEvent(new Event("change", { bubbles: true }));
+            await delay(200);
+            sendLog("gif", `Search input value is now: "${searchInput.value}"`);
+            sendLog("gif", "Waiting 2500ms for GIPHY results to render.");
+            await delay(2500);
+            await clickFirstGifResult();
           } else {
             sendLog("gif", "GIPHY search input not found — skipping.");
           }
@@ -349,7 +426,7 @@ async function sendTestMessage({ handle, message, has_gif, gif_query }) {
     }
 
     await appendRunLog("background", `Run ${runId} completed with stage ${execution.result.stage}.`);
-    return execution.result;
+    return { ...execution.result, tabId: tab.id };
   } catch (error) {
     await appendRunLog("background", `Run ${runId} failed: ${error.message}`);
     throw error;
@@ -490,9 +567,13 @@ async function processBatchItem(index) {
   const { handle, message, has_gif, gif_query } = row;
 
   try {
-    await sendTestMessage({ handle, message, has_gif, gif_query });
+    const result = await sendTestMessage({ handle, message, has_gif, gif_query });
     await appendBatchLog({ handle, status: "sent", at: new Date().toISOString() });
     await callMarkDone(row);
+    if (result?.tabId) {
+      await appendRunLog("background", `Closing tab ${result.tabId} after mark-done webhook.`);
+      await chrome.tabs.remove(result.tabId).catch(() => {});
+    }
   } catch (error) {
     await appendBatchLog({
       handle,
