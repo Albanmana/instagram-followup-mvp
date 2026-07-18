@@ -7,7 +7,8 @@
     "tabs",
     "scripting",
     "storage",
-    "alarms"
+    "alarms",
+    "downloads"
   ],
   "host_permissions": [
     "https://www.instagram.com/*",
@@ -26,6 +27,17 @@
     {
       "matches": ["https://www.instagram.com/*"],
       "js": ["crm-interceptor.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["scrape-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["scrape-interceptor.js"],
       "run_at": "document_start"
     }
   ],

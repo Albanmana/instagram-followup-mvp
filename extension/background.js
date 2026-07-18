@@ -30,6 +30,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 async function sendTestMessage({ handle, message, has_gif, gif_query }) {
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let openedTabId = null;
   await clearRunLogs();
   await appendRunLog("background", `Starting run ${runId} for @${handle}.`);
 
@@ -42,6 +43,7 @@ async function sendTestMessage({ handle, message, has_gif, gif_query }) {
       throw new Error("Chrome did not return a tab id.");
     }
 
+    openedTabId = tab.id;
     await appendRunLog("background", `Created tab ${tab.id}. Waiting for load.`);
     await waitForTabLoad(tab.id);
     await appendRunLog("background", `Tab ${tab.id} loaded.`);
@@ -52,8 +54,8 @@ async function sendTestMessage({ handle, message, has_gif, gif_query }) {
 
     const [execution] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      args: [message, runId, hasGif, gifQuery],
-      func: async (textToSend, activeRunId, hasGif, gifQuery) => {
+      args: [handle, message, runId, hasGif, gifQuery],
+      func: async (targetHandle, textToSend, activeRunId, hasGif, gifQuery) => {
       const runtime = window.chrome?.runtime;
       const sendLog = (stage, detail) => {
         console.log(`[IG Follow-Up][${activeRunId}][${stage}] ${detail}`);
@@ -114,28 +116,42 @@ async function sendTestMessage({ handle, message, has_gif, gif_query }) {
           .slice(0, 25);
       };
 
+      const findRealProfileActionButton = (root) => {
+        if (!root) {
+          return null;
+        }
+
+        const buttons = Array.from(root.querySelectorAll("button, a[role='link'], div[role='button']"));
+        return buttons.find((button) => {
+          const label = getElementLabel(button);
+
+          if (!isVisible(button) || !labelTexts.messageButton.some((text) => label.includes(text))) {
+            return false;
+          }
+
+          // Ignore the floating inbox drawer button; we only want profile-header actions here.
+          if (label === "messagesmessages" || label === "messages") {
+            return false;
+          }
+
+          const rect = button.getBoundingClientRect();
+          return rect.top < window.innerHeight * 0.75;
+        }) || null;
+      };
+
       const findProfileActionButton = () => {
-        const selectors = ["header", "main"];
+        const selectors = ["header", "main > div", "main"];
 
         for (const selector of selectors) {
           const root = document.querySelector(selector);
-          if (!root) {
-            continue;
-          }
-
-          const buttons = Array.from(root.querySelectorAll("button, a[role='link'], div[role='button']"));
-          const match = buttons.find((button) => {
-            const label = getElementLabel(button);
-
-            return isVisible(button) && labelTexts.messageButton.some((text) => label.includes(text));
-          });
+          const match = findRealProfileActionButton(root);
 
           if (match) {
             return match;
           }
         }
 
-        return findButtonByText(labelTexts.messageButton);
+        return null;
       };
 
       const findSendButton = (composer) => {
@@ -204,6 +220,17 @@ async function sendTestMessage({ handle, message, has_gif, gif_query }) {
         throw new Error(`Timed out while waiting for ${stage}.`);
       };
 
+      const waitForLocation = async (matcher, stage, timeoutMs = 15000) => {
+        await waitFor(
+          () => {
+            const path = window.location.pathname || "";
+            return matcher(path) ? path : null;
+          },
+          stage,
+          timeoutMs
+        );
+      };
+
       const setComposerValue = (element, value) => {
         sendLog("composer", "Filling message composer.");
         element.focus();
@@ -234,6 +261,54 @@ async function sendTestMessage({ handle, message, has_gif, gif_query }) {
 
           return isVisible(candidate) && labelTexts.composerAria.some((text) => label.includes(text));
         }) || candidates.find((candidate) => isVisible(candidate));
+      };
+
+      const findInboxSearchInput = () => {
+        const candidates = Array.from(document.querySelectorAll("input"));
+        return candidates.find((candidate) => {
+          const placeholder = normalize(candidate.getAttribute("placeholder"));
+          const ariaLabel = normalize(candidate.getAttribute("aria-label"));
+          return isVisible(candidate) && [placeholder, ariaLabel].some((value) => value.includes("rechercher") || value.includes("search"));
+        }) || null;
+      };
+
+      const typeIntoInboxSearch = async (input, query) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        if (!setter) {
+          throw new Error("Could not access the native input value setter.");
+        }
+
+        const chars = Array.from(query);
+        input.focus();
+        setter.call(input, "");
+        input.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+        input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+        await delay(120);
+
+        for (const char of chars) {
+          const nextValue = `${input.value || ""}${char}`;
+          setter.call(input, nextValue);
+          input.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "insertText", data: char }));
+          input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: char }));
+          input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: char }));
+          input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: char }));
+          await delay(80);
+        }
+
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+
+      const findInboxResultButton = (username) => {
+        const normalizedUsername = normalize(String(username || "").replace(/^@+/, ""));
+        if (!normalizedUsername) {
+          return null;
+        }
+
+        const buttons = Array.from(document.querySelectorAll("button"));
+        return buttons.find((button) => {
+          const label = getElementLabel(button);
+          return isVisible(button) && label.includes(normalizedUsername);
+        }) || null;
       };
 
       const findGifSearchInput = () => {
@@ -306,18 +381,30 @@ async function sendTestMessage({ handle, message, has_gif, gif_query }) {
 
       sendLog("profile", `Visible action labels on page: ${getVisibleActionLabels().join(" | ")}`);
 
-      const messageButton = await waitFor(
-        findProfileActionButton,
-        "the profile message button",
-        15000,
-        () => sendLog("profile", `Did not find a profile message button. Visible labels: ${getVisibleActionLabels().join(" | ")}`)
-      );
+      let composer = null;
+      const messageButton = findProfileActionButton();
 
-      sendLog("profile", "Found message button. Opening conversation.");
-      messageButton.click();
-      await delay(1500);
+      if (messageButton) {
+        sendLog("profile", `Found profile action button: "${getElementLabel(messageButton)}". Opening conversation.`);
+        messageButton.click();
+        await delay(1500);
+        composer = await waitFor(findComposer, "the message composer", 6000).catch(() => null);
 
-      const composer = await waitFor(findComposer, "the message composer");
+        if (!composer) {
+          sendLog("fallback", "Profile action button did not open a composer. Switching to inbox fallback.");
+        }
+      } else {
+        sendLog("fallback", `No profile message/contact button found. Visible labels: ${getVisibleActionLabels().join(" | ")}`);
+      }
+
+      if (!composer) {
+        sendLog("fallback", `Inbox fallback requested for @${targetHandle}. Re-injection required after navigation.`);
+        return {
+          stage: "needs_inbox_fallback",
+          targetHandle,
+        };
+      }
+
       sendLog("composer", "Composer found.");
 
       if (hasGif && gifQuery) {
@@ -424,15 +511,446 @@ async function sendTestMessage({ handle, message, has_gif, gif_query }) {
       }
     });
 
-    if (!execution?.result) {
-      throw new Error("Instagram automation finished without a result.");
+    if (execution?.error) {
+      throw new Error(`Instagram automation script failed: ${execution.error.message ?? JSON.stringify(execution.error)}`);
     }
 
-    await appendRunLog("background", `Run ${runId} completed with stage ${execution.result.stage}.`);
-    return { ...execution.result, tabId: tab.id };
+    if (!execution?.result) {
+      throw new Error("Instagram automation finished without a result. The content script returned no structured result.");
+    }
+
+    let finalResult = execution.result;
+
+    if (finalResult.stage === "needs_inbox_fallback") {
+      await appendRunLog("background", `Profile flow requested inbox fallback for @${handle}.`);
+      await appendRunLog("background", `Opening inbox fallback in tab ${tab.id}.`);
+      await chrome.tabs.update(tab.id, { url: "https://www.instagram.com/direct/inbox/" });
+      await waitForTabLoad(tab.id);
+      await appendRunLog("background", `Inbox fallback tab ${tab.id} loaded.`);
+      await delay(1500);
+
+      const [fallbackExecution] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        args: [handle, message, runId, hasGif, gifQuery],
+        func: async (targetHandle, textToSend, activeRunId, hasGif, gifQuery) => {
+          const runtime = window.chrome?.runtime;
+          const sendLog = (stage, detail) => {
+            console.log(`[IG Follow-Up][${activeRunId}][${stage}] ${detail}`);
+            if (runtime?.sendMessage) {
+              runtime.sendMessage({
+                type: "RUN_LOG",
+                payload: { source: "content", message: `[${stage}] ${detail}` }
+              });
+            }
+          };
+
+          const labelTexts = {
+            sendButton: ["send", "envoyer"],
+            composerAria: ["message", "envoyer un message", "votre message"]
+          };
+
+          const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+          const normalize = (value) =>
+            (value || "")
+              .toLowerCase()
+              .replace(/\s+/g, " ")
+              .trim();
+
+          const isVisible = (element) => {
+            if (!(element instanceof HTMLElement)) {
+              return false;
+            }
+
+            const rect = element.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+          };
+
+          const getElementLabel = (element) => {
+            return (
+              normalize(element.textContent) ||
+              normalize(element.getAttribute("aria-label")) ||
+              normalize(element.getAttribute("title")) ||
+              normalize(element.getAttribute("placeholder"))
+            );
+          };
+
+          const waitFor = async (finder, stage, timeoutMs = 15000, onTimeout) => {
+            const startedAt = Date.now();
+
+            while (Date.now() - startedAt < timeoutMs) {
+              const result = finder();
+              if (result) {
+                return result;
+              }
+
+              await delay(400);
+            }
+
+            if (onTimeout) {
+              onTimeout();
+            }
+
+            throw new Error(`Timed out while waiting for ${stage}.`);
+          };
+
+          const waitForLocation = async (matcher, stage, timeoutMs = 15000) => {
+            await waitFor(
+              () => {
+                const path = window.location.pathname || "";
+                return matcher(path) ? path : null;
+              },
+              stage,
+              timeoutMs
+            );
+          };
+
+          const findComposer = () => {
+            const candidates = Array.from(document.querySelectorAll("div[contenteditable='true'], textarea"));
+
+            return candidates.find((candidate) => {
+              const label = getElementLabel(candidate);
+              return isVisible(candidate) && labelTexts.composerAria.some((text) => label.includes(text));
+            }) || candidates.find((candidate) => isVisible(candidate));
+          };
+
+          const setComposerValue = (element, value) => {
+            sendLog("composer", "Filling message composer.");
+            element.focus();
+
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+
+            document.execCommand("selectAll", false, null);
+            const inserted = document.execCommand("insertText", false, value);
+
+            if (!inserted) {
+              element.textContent = value;
+              element.dispatchEvent(new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));
+            }
+          };
+
+          const findSendButton = (composer) => {
+            const exactSendButton = Array.from(document.querySelectorAll("button, div[role='button']")).find((button) => {
+              const label = getElementLabel(button);
+              return isVisible(button) && labelTexts.sendButton.some((text) => label === text || label.includes(text));
+            });
+
+            if (exactSendButton) {
+              return exactSendButton;
+            }
+
+            const containers = [];
+            let current = composer;
+
+            while (current && containers.length < 5) {
+              containers.push(current);
+              current = current.parentElement;
+            }
+
+            for (const container of containers) {
+              const buttons = Array.from(container.querySelectorAll("button, div[role='button']"));
+              const candidate = buttons.find((button) => {
+                if (!isVisible(button) || button === composer) {
+                  return false;
+                }
+
+                const label = getElementLabel(button);
+                return labelTexts.sendButton.some((text) => label.includes(text));
+              });
+
+              if (candidate) {
+                return candidate;
+              }
+            }
+
+            return null;
+          };
+
+          const findInboxSearchInput = () => {
+            const candidates = Array.from(document.querySelectorAll("input"));
+            return candidates.find((candidate) => {
+              const placeholder = normalize(candidate.getAttribute("placeholder"));
+              const ariaLabel = normalize(candidate.getAttribute("aria-label"));
+              return isVisible(candidate) && [placeholder, ariaLabel].some((value) => value.includes("rechercher") || value.includes("search"));
+            }) || null;
+          };
+
+          const typeIntoInboxSearch = async (input, query) => {
+            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+            if (!setter) {
+              throw new Error("Could not access the native input value setter.");
+            }
+
+            const chars = Array.from(query);
+            input.focus();
+            setter.call(input, "");
+            input.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+            input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+            await delay(120);
+
+            for (const char of chars) {
+              const nextValue = `${input.value || ""}${char}`;
+              setter.call(input, nextValue);
+              input.dispatchEvent(new InputEvent("beforeinput", { bubbles: true, inputType: "insertText", data: char }));
+              input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: char }));
+              input.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: char }));
+              input.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: char }));
+              await delay(80);
+            }
+
+            input.dispatchEvent(new Event("change", { bubbles: true }));
+          };
+
+          const findInboxResultButton = (username) => {
+            const normalizedUsername = normalize(String(username || "").replace(/^@+/, ""));
+            if (!normalizedUsername) {
+              return null;
+            }
+
+            const buttons = Array.from(document.querySelectorAll("button"));
+            return buttons.find((button) => {
+              const label = getElementLabel(button);
+              return isVisible(button) && label.includes(normalizedUsername);
+            }) || null;
+          };
+
+          const findGifSearchInput = () => {
+            const candidates = Array.from(
+              document.querySelectorAll(
+                'input[aria-label="Rechercher dans GIPHY"], input[placeholder="Rechercher dans GIPHY"]'
+              )
+            );
+
+            return candidates.find((candidate) => isVisible(candidate)) || null;
+          };
+
+          const findVisibleGifTabs = () =>
+            Array.from(document.querySelectorAll('[role="tab"]')).filter((tab) => isVisible(tab));
+
+          const findGifPickerButton = () => {
+            const directButton = document.querySelector('button[aria-label="Choisir un GIF ou un sticker"]');
+            if (directButton && isVisible(directButton)) {
+              return directButton;
+            }
+
+            const icon = document.querySelector('[aria-label="Choisir un GIF ou un sticker"]');
+            const parentButton = icon?.closest('button,[role="button"],div[role="button"]');
+
+            if (parentButton && isVisible(parentButton)) {
+              return parentButton;
+            }
+
+            return null;
+          };
+
+          const findVisibleGifResultButtons = () =>
+            Array.from(
+              document.querySelectorAll(
+                'div[role="button"][aria-label^="Send Animated Image"], button[aria-label^="Send Animated Image"]'
+              )
+            ).filter((button) => isVisible(button));
+
+          const findFirstGifResult = () => findVisibleGifResultButtons()[0] ?? null;
+
+          const clickFirstGifResult = async () => {
+            const button = await waitFor(findFirstGifResult, "GIF result", 8000).catch(() => null);
+
+            if (!button) {
+              sendLog("gif", "No GIF result found — skipping.");
+              return false;
+            }
+
+            button.scrollIntoView({ block: "center", inline: "center" });
+            await delay(200);
+
+            let freshButton = findFirstGifResult();
+            if (!freshButton) {
+              sendLog("gif", "GIF result disappeared before click. Retrying once.");
+              await delay(400);
+              freshButton = findFirstGifResult();
+            }
+
+            if (!freshButton) {
+              sendLog("gif", "GIF result still unavailable after retry — skipping.");
+              return false;
+            }
+
+            freshButton.click();
+            sendLog("gif", "GIF sent.");
+            await delay(800);
+            return true;
+          };
+
+          const normalizedUsername = String(targetHandle || "").replace(/^@+/, "").trim();
+          if (!normalizedUsername) {
+            throw new Error("Inbox fallback could not determine which Instagram handle to search.");
+          }
+
+          const firstSearchToken = normalizedUsername.slice(0, 1) || normalizedUsername;
+          sendLog("fallback", `Inbox fallback script started for @${normalizedUsername}.`);
+          await waitForLocation(
+            (path) => path.startsWith("/direct/inbox"),
+            "the inbox fallback route",
+            20000
+          );
+          await delay(1500);
+
+          const searchInput = await waitFor(
+            findInboxSearchInput,
+            "the inbox search input",
+            10000,
+            () => sendLog("fallback", "Inbox search input not found.")
+          );
+          sendLog("fallback", `Inbox search ready. Triggering search for @${normalizedUsername}.`);
+          await typeIntoInboxSearch(searchInput, firstSearchToken);
+          await delay(1200);
+
+          const resultButton = await waitFor(
+            () => findInboxResultButton(normalizedUsername),
+            `the inbox result for @${normalizedUsername}`,
+            12000,
+            () => sendLog("fallback", `No visible inbox result yet for @${normalizedUsername}.`)
+          );
+          sendLog("fallback", `Inbox result found for @${normalizedUsername}. Opening conversation.`);
+          resultButton.click();
+
+          await waitForLocation(
+            (path) => path.startsWith("/direct/t/"),
+            "the inbox conversation route",
+            20000
+          );
+          await delay(1200);
+
+          const composer = await waitFor(findComposer, "the inbox fallback message composer", 12000);
+          sendLog("composer", "Composer found via inbox fallback.");
+
+          if (hasGif && gifQuery) {
+            sendLog("gif", `Sending GIF: "${gifQuery}"`);
+            const pickerBtn = await waitFor(findGifPickerButton, "GIF picker button", 5000).catch(() => null);
+
+            if (pickerBtn) {
+              sendLog("gif", "Step 1/3: opening sticker/GIF picker.");
+              pickerBtn.click();
+              await delay(800);
+
+              let searchInput = findGifSearchInput();
+
+              if (!searchInput) {
+                const gifTabs = findVisibleGifTabs();
+                const gifTab =
+                  gifTabs.find((tab) => normalize(tab.textContent).includes("gif"))
+                  ?? gifTabs[1]
+                  ?? null;
+
+                if (gifTab) {
+                  sendLog("gif", "Step 2/3: switching to the GIPHY tab.");
+                  gifTab.click();
+                  await delay(600);
+                } else {
+                  sendLog("gif", `No visible GIF tab found. Visible tabs: ${gifTabs.map((tab) => normalize(tab.textContent) || "<icon-only>").join(" | ")}`);
+                }
+              } else {
+                sendLog("gif", "Step 2/3: GIPHY tab already open.");
+              }
+
+              searchInput = await waitFor(findGifSearchInput, "GIPHY search input", 5000).catch(() => null);
+
+              if (searchInput) {
+                sendLog("gif", "Step 3/3: filling the GIPHY search input.");
+                searchInput.focus();
+                searchInput.click();
+                searchInput.select?.();
+
+                const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
+                setter.call(searchInput, "");
+                searchInput.dispatchEvent(new InputEvent("input", { bubbles: true, data: null, inputType: "deleteContentBackward" }));
+                setter.call(searchInput, gifQuery);
+                searchInput.dispatchEvent(new InputEvent("input", { bubbles: true, data: gifQuery, inputType: "insertText" }));
+                searchInput.dispatchEvent(new Event("change", { bubbles: true }));
+                await delay(200);
+                sendLog("gif", `Search input value is now: "${searchInput.value}"`);
+                sendLog("gif", "Waiting 2500ms for GIPHY results to render.");
+                await delay(2500);
+                await clickFirstGifResult();
+              } else {
+                sendLog("gif", "GIPHY search input not found — skipping.");
+              }
+            } else {
+              sendLog("gif", "GIF picker button not found — skipping.");
+            }
+          }
+
+          setComposerValue(composer, textToSend);
+          await delay(600);
+
+          const sendButton = findSendButton(composer);
+
+          if (sendButton) {
+            sendLog("send", "Send button found. Clicking it.");
+            sendButton.click();
+          } else {
+            sendLog("send", "No send button found. Falling back to Enter key.");
+            composer.dispatchEvent(
+              new KeyboardEvent("keydown", {
+                key: "Enter",
+                code: "Enter",
+                which: 13,
+                keyCode: 13,
+                bubbles: true
+              })
+            );
+            composer.dispatchEvent(
+              new KeyboardEvent("keyup", {
+                key: "Enter",
+                code: "Enter",
+                which: 13,
+                keyCode: 13,
+                bubbles: true
+              })
+            );
+          }
+
+          await delay(1200);
+          sendLog("done", "Inbox fallback send flow completed.");
+
+          return {
+            stage: "sent",
+            sentText: textToSend,
+            usedInboxFallback: true,
+          };
+        }
+      });
+
+      if (fallbackExecution?.error) {
+        throw new Error(`Instagram inbox fallback script failed: ${fallbackExecution.error.message ?? JSON.stringify(fallbackExecution.error)}`);
+      }
+
+      if (!fallbackExecution?.result) {
+        throw new Error("Instagram inbox fallback finished without a result. The content script returned no structured result.");
+      }
+
+      finalResult = fallbackExecution.result;
+    }
+
+    await appendRunLog("background", `Run ${runId} completed with stage ${finalResult.stage}.`);
+    return { ...finalResult };
   } catch (error) {
     await appendRunLog("background", `Run ${runId} failed: ${error.message}`);
     throw error;
+  } finally {
+    if (openedTabId) {
+      await appendRunLog("background", `Closing tab ${openedTabId} after run ${runId} (${handle}).`);
+      await chrome.tabs.remove(openedTabId)
+        .then(() => appendRunLog("background", `Closed tab ${openedTabId}.`))
+        .catch(async (closeError) => {
+          await appendRunLog("background", `Failed to close tab ${openedTabId}: ${closeError.message}`);
+        });
+    }
   }
 }
 
@@ -781,13 +1299,9 @@ async function processBatchItem(index) {
   const { handle, message, has_gif, gif_query } = row;
 
   try {
-    const result = await sendTestMessage({ handle, message, has_gif, gif_query });
+    await sendTestMessage({ handle, message, has_gif, gif_query });
     await appendBatchLog({ handle, status: "sent", at: new Date().toISOString() });
     await callMarkDone(row);
-    if (result?.tabId) {
-      await appendRunLog("background", `Closing tab ${result.tabId} after mark-done webhook.`);
-      await chrome.tabs.remove(result.tabId).catch(() => {});
-    }
   } catch (error) {
     await appendBatchLog({
       handle,
@@ -1085,6 +1599,63 @@ function extractProfileFromNetworkPayload(payload, expectedUsername) {
   return best?.profile ?? null;
 }
 
+function extractProfileListFromNetworkPayload(data) {
+  const profiles = new Map();
+
+  const processUser = (node) => {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return;
+    const username = normalizeText(node.username);
+    if (!username || username.length > 40 || profiles.has(username)) return;
+
+    const bio = String(node.biography || node.bio || "").trim();
+    const followerCount = node.follower_count ?? node.edge_followed_by?.count ?? null;
+    const postsCount = node.media_count ?? node.edge_owner_to_timeline_media?.count ?? null;
+
+    const externalLinks = [];
+    if (node.external_url) externalLinks.push(node.external_url);
+    if (Array.isArray(node.bio_links)) {
+      node.bio_links.forEach((link) => {
+        const url = link?.url || link?.link_url;
+        if (url) externalLinks.push(url);
+      });
+    }
+
+    profiles.set(username, {
+      name: String(node.full_name || node.name || "").trim(),
+      bio,
+      followers_count: followerCount != null ? Number(followerCount) : null,
+      posts_count: postsCount != null ? Number(postsCount) : null,
+      is_private: typeof node.is_private === "boolean" ? node.is_private : null,
+      is_verified: typeof node.is_verified === "boolean" ? node.is_verified : null,
+      is_business_account: typeof node.is_business_account === "boolean" ? node.is_business_account : null,
+      external_links: [...new Set(externalLinks.filter(Boolean))].join(" | "),
+    });
+  };
+
+  // REST: { users: [...] }
+  if (Array.isArray(data?.users)) {
+    data.users.forEach(processUser);
+  }
+
+  // GraphQL: walk edges recursively
+  const walkEdges = (obj, depth = 0) => {
+    if (!obj || typeof obj !== "object" || depth > 8) return;
+    if (Array.isArray(obj)) {
+      obj.forEach((item) => walkEdges(item, depth + 1));
+      return;
+    }
+    if (Array.isArray(obj.edges)) {
+      obj.edges.forEach((edge) => processUser(edge?.node));
+    }
+    for (const val of Object.values(obj)) {
+      if (val && typeof val === "object") walkEdges(val, depth + 1);
+    }
+  };
+  walkEdges(data);
+
+  return profiles;
+}
+
 function dedupeLeadsByUsername(leads) {
   const seen = new Set();
   const results = [];
@@ -1168,6 +1739,65 @@ function createCsvContent(rows) {
 
 function createCsvDownloadUrl(csv) {
   return `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`;
+}
+
+function sanitizeFilenamePart(value, fallback = "instagram") {
+  const normalized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^@+/, "")
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "");
+  return normalized || fallback;
+}
+
+function getScrapeTargetLabel(scrapeJob) {
+  const sourceType = scrapeJob?.sourceType || "comments";
+  const targetUrl = String(scrapeJob?.postUrl || "");
+
+  if (!targetUrl) return "instagram";
+
+  try {
+    const parsed = new URL(targetUrl);
+    const segments = parsed.pathname.split("/").filter(Boolean);
+
+    if (sourceType === "comments") {
+      return sanitizeFilenamePart(segments[1] || segments[0] || "post", "post");
+    }
+
+    return sanitizeFilenamePart(segments[0] || "profile", "profile");
+  } catch {
+    return sanitizeFilenamePart(targetUrl, "instagram");
+  }
+}
+
+function buildScrapeCsvFilename({ scrapeJob, scrapeResults }) {
+  const targetLabel = getScrapeTargetLabel(scrapeJob);
+  const sourceLabel = sanitizeFilenamePart(scrapeJob?.sourceType || "comments", "comments");
+  const rowCount = Array.isArray(scrapeResults) ? scrapeResults.length : 0;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+
+  return `${targetLabel}-${sourceLabel}-${rowCount}-rows-${timestamp}.csv`;
+}
+
+async function downloadScrapeCsv({ scrapeJob, scrapeResults, saveAs = true, allowEmpty = false } = {}) {
+  const rows = Array.isArray(scrapeResults) ? scrapeResults : [];
+  if (!allowEmpty && !rows.length) {
+    throw new Error("No scrape results available yet.");
+  }
+
+  const csv = createCsvContent(rows);
+  const url = createCsvDownloadUrl(csv);
+  const filename = buildScrapeCsvFilename({ scrapeJob, scrapeResults: rows });
+
+  await chrome.downloads.download({
+    url,
+    filename,
+    saveAs,
+  });
+
+  return filename;
 }
 
 async function openTabAndWait(url, active = false) {
@@ -1262,13 +1892,8 @@ async function fallbackCollectCommentsFromDom(tabId, postUrl) {
         const permalink = permalinkLink.href;
         if (!permalink || seenPermalinks.has(permalink)) return;
 
-        const row =
-          permalinkLink.closest("button") ||
-          permalinkLink.parentElement?.closest("div[role='button']") ||
-          permalinkLink.closest("[role='button']") ||
-          permalinkLink.parentElement?.closest("div") ||
-          permalinkLink.parentElement;
-
+        let row = permalinkLink;
+        for (let i = 0; i < 4; i++) row = row?.parentElement;
         if (!row) return;
 
         const profileLink = Array.from(
@@ -1276,7 +1901,7 @@ async function fallbackCollectCommentsFromDom(tabId, postUrl) {
         ).find((candidate) => {
           const href = candidate.getAttribute("href") || "";
           if (!href) return false;
-          if (href.includes("/p/") || href.includes("/reel/") || href.includes("/explore/") || href.includes("/stories/")) {
+          if (href.includes("/p/") || href.includes("/reel/") || href.includes("/explore/") || href.includes("/stories/") || href.includes("/c/")) {
             return false;
           }
           return true;
@@ -1284,50 +1909,38 @@ async function fallbackCollectCommentsFromDom(tabId, postUrl) {
 
         if (!profileLink) return;
 
-        const username = normalize((profileLink.getAttribute("href") || profileLink.textContent || "").split("/").filter(Boolean)[0]);
+        const username = normalize((profileLink.getAttribute("href") || "").split("/").filter(Boolean)[0]);
         if (!username || username.length > 40) return;
+        const usernameLower = username.toLowerCase();
         const rowText = normalize(row.textContent);
-        const headingText = normalize(
-          row.querySelector("h3, header, [role='heading']")?.textContent ||
-          profileLink.textContent ||
-          ""
-        );
-        const name = normalize(
-          headingText
-            .replace(new RegExp(`^${escapeRegex(username)}\\b`, "i"), "")
-            .replace(/\b(verified|verifie|vérifié)\b/gi, "")
-        );
-        const isVerified = /\b(verified|verifie|vérifié)\b/i.test(headingText) || /\b(verified|verifie|vérifié)\b/i.test(rowText);
+
+        const isVerified = !!(
+          row.querySelector("svg title") &&
+          Array.from(row.querySelectorAll("svg title")).some((t) => /vérifié|verified/i.test(t.textContent))
+        ) || !!row.querySelector("[aria-label=\"Vérifié\"], [aria-label=\"Verified\"]");
 
         const baseCandidates = Array.from(row.querySelectorAll("span, h3"))
           .map((element) => normalize(element.textContent))
           .filter(Boolean)
-          .filter((text) => text !== username)
+          .filter((text) => text.toLowerCase() !== usernameLower)
           .filter((text) => text !== normalize(permalinkLink.textContent))
           .filter((text) => !isControlText(text))
           .filter((text) => !isRelativeDate(text))
-          .filter((text) => !/(?:\d+\s+)?j['’]aime$/i.test(text))
+          .filter((text) => !/(?:\d+\s+)?j[‘’]aime$/i.test(text))
           .filter((text) => !/^\d+\s+likes?$/i.test(text))
-          .filter((text) => !text.startsWith(`${username} `));
-
-        const strictComment = baseCandidates
-          .filter((text) => text !== headingText)
-          .filter((text) => text !== name)
           .filter((text) => !/\b(verified|verifie|vérifié)\b/i.test(text))
-          .sort((a, b) => b.length - a.length)[0] || "";
+          .filter((text) => !text.toLowerCase().startsWith(usernameLower));
 
-        const looseComment = baseCandidates
-          .sort((a, b) => b.length - a.length)[0] || "";
-
-        let commentText = strictComment || looseComment;
+        let commentText = baseCandidates.sort((a, b) => b.length - a.length)[0] || "";
 
         if (!commentText) {
-          commentText = rowText
-            .replace(new RegExp(`^${escapeRegex(username)}\\b`, "i"), "")
+          const usernameIdx = rowText.toLowerCase().indexOf(usernameLower);
+          const afterUsername = usernameIdx !== -1 ? rowText.slice(usernameIdx + username.length) : rowText;
+          commentText = afterUsername
             .replace(/\b(verified|verifie|vérifié)\b/gi, "")
             .replace(/\b\d+\s*(?:sem|w|d|j|min|h|wk|mo)\b/gi, "")
-            .replace(/\b\d+\s+(?:j['’]aime|likes?)\b/gi, "")
-            .replace(/\b(répondre|reply|voir la traduction|j['’]aime|like)\b/gi, "")
+            .replace(/\b\d+\s+(?:j[‘’]aime|likes?)\b/gi, "")
+            .replace(/\b(répondre|reply|voir la traduction|j[‘’]aime|like)\b/gi, "")
             .replace(/\s+/g, " ")
             .trim();
         }
@@ -1341,7 +1954,7 @@ async function fallbackCollectCommentsFromDom(tabId, postUrl) {
         items.push({
           source_type: "comments",
           username,
-          name,
+          name: "",
           profile_url: `https://www.instagram.com/${username}/`,
           is_verified: isVerified,
           comment_text: commentText,
@@ -1356,11 +1969,16 @@ async function fallbackCollectCommentsFromDom(tabId, postUrl) {
           permalinkCount: permalinkLinks.length,
           itemCount: items.length,
           bodyTextLength: normalize(document.body?.innerText || "").length,
+          pageUrl: location.href,
+          pageTitle: document.title,
         },
       };
     },
   });
 
+  if (result?.error) {
+    await appendScrapeLog(`DOM collection script error: ${result.error.message ?? JSON.stringify(result.error)}`);
+  }
   return result?.result ?? { items: [], debug: { permalinkCount: 0, itemCount: 0, bodyTextLength: 0 } };
 }
 
@@ -1431,7 +2049,7 @@ async function fallbackProfileFromDom(tabId) {
 }
 
 async function openProfileListModal(tabId, sourceType) {
-  await chrome.scripting.executeScript({
+  const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     args: [sourceType],
     func: async (activeSourceType) => {
@@ -1443,49 +2061,185 @@ async function openProfileListModal(tabId, sourceType) {
         return rect.width > 0 && rect.height > 0;
       };
 
-      const matchesSource = (label) => {
+      const hrefKeyword = activeSourceType === "followers" ? "/followers/" : "/following/";
+      const matchesSourceText = (label) => {
         if (activeSourceType === "followers") {
-          return label.includes("followers") || label.includes("abonn");
+          return label.includes("followers") || label.includes("abonn") || label.includes("suiveur");
         }
         return (
           label.includes("following") ||
+          label.includes("abonnement") ||
           label.includes("suivi") ||
           label.includes("followed")
         );
       };
 
+      const findTrigger = () => {
+        // Prefer href-based matching — language-independent
+        const byHref = Array.from(document.querySelectorAll("a[href]")).find((a) => {
+          const href = a.getAttribute("href") || "";
+          return href.includes(hrefKeyword) && isVisible(a) && a.closest("header, section, main, nav") != null;
+        });
+        if (byHref) return byHref;
+
+        // Fallback: text-based matching
+        return Array.from(document.querySelectorAll("a, button, span[role='link'], div[role='button']")).find((candidate) => {
+          const text = normalize(candidate.textContent || candidate.getAttribute("aria-label") || "");
+          if (!text || !matchesSourceText(text) || !isVisible(candidate)) return false;
+          return candidate.closest("header, section, main") != null;
+        });
+      };
+
       let trigger = null;
       const startedAt = Date.now();
       while (!trigger && Date.now() - startedAt < 15000) {
-        const candidates = Array.from(document.querySelectorAll("a, button, span, div"));
-        trigger = candidates.find((candidate) => {
-          const text = normalize(candidate.textContent || candidate.getAttribute("aria-label"));
-          if (!text || !matchesSource(text) || !isVisible(candidate)) return false;
-          return candidate.closest("header, section, main") != null;
-        });
-        if (!trigger) {
-          await delay(300);
-        }
+        trigger = findTrigger();
+        if (!trigger) await delay(300);
       }
 
       if (!trigger) {
-        throw new Error(`Could not find the ${activeSourceType} trigger on the profile.`);
+        return { error: `Could not find the ${activeSourceType} trigger on the profile.` };
       }
 
       trigger.click();
 
       const modalStartedAt = Date.now();
       while (Date.now() - modalStartedAt < 10000) {
-        const dialog = document.querySelector("div[role='dialog']");
+        const dialog = document.querySelector("div[role='dialog'], section[role='dialog']");
         if (dialog && isVisible(dialog)) {
-          return;
+          return { ok: true };
         }
         await delay(250);
       }
 
-      throw new Error(`The ${activeSourceType} modal did not open.`);
+      return { error: `The ${activeSourceType} modal did not open after clicking trigger (href=${trigger.getAttribute("href")}, text="${trigger.textContent?.trim().slice(0, 40)}").` };
     },
   });
+
+  if (result?.error) {
+    throw new Error(result.error.message ?? JSON.stringify(result.error));
+  }
+  if (result?.result?.error) {
+    throw new Error(result.result.error);
+  }
+}
+
+async function expandFollowersModalIfNeeded(tabId) {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: async () => {
+      const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const normalize = (value) => String(value || "").toLowerCase().replace(/\s+/g, " ").trim();
+      const isVisible = (element) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      };
+      const isProfileLink = (href) => {
+        const value = String(href || "");
+        if (!value) return false;
+        const normalizedHref = value.startsWith("/")
+          ? value
+          : value.replace(/^https:\/\/www\.instagram\.com/i, "");
+        return /^\/?[^/?#]+\/?$/.test(normalizedHref);
+      };
+      const countProfileAnchors = (dialog) => {
+        if (!(dialog instanceof HTMLElement)) return 0;
+        return Array.from(dialog.querySelectorAll("a[href]")).filter((anchor) => {
+          return isVisible(anchor) && isProfileLink(anchor.getAttribute("href") || anchor.href);
+        }).length;
+      };
+      const findExpandTrigger = (dialog) => {
+        if (!(dialog instanceof HTMLElement)) return null;
+
+        const anchors = Array.from(dialog.querySelectorAll("a[href]"));
+        const byHref = anchors.find((anchor) => {
+          const href = anchor.getAttribute("href") || anchor.href || "";
+          return isVisible(anchor) && href.includes("/followers/mutualFirst");
+        });
+        if (byHref) return byHref;
+
+        return Array.from(dialog.querySelectorAll("a, button, span[role='link'], div[role='button']")).find((candidate) => {
+          const label = normalize(candidate.textContent || candidate.getAttribute("aria-label") || "");
+          return isVisible(candidate) && label.includes("all followers");
+        }) || null;
+      };
+
+      const modalStartedAt = Date.now();
+      let dialog = null;
+      while (!dialog && Date.now() - modalStartedAt < 10000) {
+        const candidate = document.querySelector("div[role='dialog'], section[role='dialog']");
+        if (candidate && isVisible(candidate)) {
+          dialog = candidate;
+          break;
+        }
+        await delay(250);
+      }
+
+      if (!dialog) {
+        return { error: "Followers modal is not open." };
+      }
+
+      const expandTrigger = findExpandTrigger(dialog);
+      if (!expandTrigger) {
+        return {
+          expanded: false,
+          beforeCount: countProfileAnchors(dialog),
+          afterCount: countProfileAnchors(dialog),
+          reason: "expand-trigger-not-found",
+        };
+      }
+
+      const beforeCount = countProfileAnchors(dialog);
+      const previousUrl = window.location.pathname;
+      expandTrigger.click();
+
+      const expandedStartedAt = Date.now();
+      while (Date.now() - expandedStartedAt < 10000) {
+        const activeDialog = document.querySelector("div[role='dialog'], section[role='dialog']");
+        if (!activeDialog || !isVisible(activeDialog)) {
+          await delay(250);
+          continue;
+        }
+
+        const afterCount = countProfileAnchors(activeDialog);
+        const currentPath = window.location.pathname;
+        const expandStillVisible = findExpandTrigger(activeDialog);
+        const movedToFullList = currentPath.includes("/followers/mutualFirst") && currentPath !== previousUrl;
+        const listGrew = afterCount > beforeCount;
+
+        if (movedToFullList || listGrew || !expandStillVisible) {
+          await delay(800);
+          return {
+            expanded: true,
+            beforeCount,
+            afterCount: countProfileAnchors(activeDialog),
+            previousPath: previousUrl,
+            currentPath,
+          };
+        }
+
+        await delay(250);
+      }
+
+      return {
+        expanded: true,
+        beforeCount,
+        afterCount: countProfileAnchors(dialog),
+        previousPath: previousUrl,
+        currentPath: window.location.pathname,
+        timedOut: true,
+      };
+    },
+  });
+
+  if (result?.error) {
+    throw new Error(result.error.message ?? JSON.stringify(result.error));
+  }
+  if (result?.result?.error) {
+    throw new Error(result.result.error);
+  }
+  return result?.result ?? { expanded: false, reason: "no-result" };
 }
 
 async function collectProfileListFromDom(tabId, sourceType, maxLeads) {
@@ -1517,13 +2271,37 @@ async function collectProfileListFromDom(tabId, sourceType, maxLeads) {
         return normalized.split("/").filter(Boolean)[0] || "";
       };
 
-      const dialog = document.querySelector("div[role='dialog']");
+      const dialog = document.querySelector("div[role='dialog'], section[role='dialog']");
       if (!dialog || !isVisible(dialog)) {
         throw new Error(`${activeSourceType} modal is not open.`);
       }
 
-      const listRoot = Array.from(dialog.querySelectorAll("div"))
-        .find((node) => node.scrollHeight > node.clientHeight + 120) || dialog;
+      const limitationText = normalize(dialog.innerText || "");
+      const ownerOnlyListNotice =
+        activeSourceType === "followers" &&
+        (
+          /only\s+[^\n]{0,80}\s+can see all followers/i.test(limitationText) ||
+          /seul(?:\(e\))?\s+[^\n]{0,80}\s+peut voir tous les followers/i.test(limitationText)
+        );
+      const othersSummaryMatch = limitationText.match(
+        activeSourceType === "followers"
+          ? /\b(?:and|et)\s+([\d.,kmb\s]+)\s+others\b/i
+          : /\b(?:and|et)\s+([\d.,kmb\s]+)\s+others\b/i
+      );
+
+      // Find the innermost scrollable container — prefer the one that already holds anchors
+      const findListRoot = () => {
+        const candidates = Array.from(dialog.querySelectorAll("*")).filter((el) => {
+          if (!(el instanceof HTMLElement)) return false;
+          const style = window.getComputedStyle(el);
+          return /(auto|scroll)/i.test(style.overflowY) && el.scrollHeight > el.clientHeight + 50;
+        });
+        return (
+          candidates.reverse().find((el) => el.querySelector("a[href]")) ||
+          candidates[0] ||
+          dialog
+        );
+      };
 
       const collected = new Map();
       let idlePasses = 0;
@@ -1531,7 +2309,6 @@ async function collectProfileListFromDom(tabId, sourceType, maxLeads) {
 
       const collectVisibleRows = () => {
         const anchors = Array.from(dialog.querySelectorAll("a[href]"))
-          .filter((anchor) => isVisible(anchor))
           .filter((anchor) => isProfileHref(anchor.getAttribute("href")));
 
         anchors.forEach((anchor) => {
@@ -1544,7 +2321,7 @@ async function collectProfileListFromDom(tabId, sourceType, maxLeads) {
                 .map((node) => normalize(node.textContent))
                 .filter(Boolean)
             : [];
-          const name = textNodes.find((text) => text && text !== username && !/^suivre$/i.test(text) && !/^following$/i.test(text)) || "";
+          const name = textNodes.find((text) => text && text !== username && !/^suivre$/i.test(text) && !/^following$/i.test(text) && !/^s'abonner$/i.test(text)) || "";
 
           collected.set(username, {
             source_type: activeSourceType,
@@ -1559,6 +2336,10 @@ async function collectProfileListFromDom(tabId, sourceType, maxLeads) {
         });
       };
 
+      // Initial collection before first scroll
+      collectVisibleRows();
+      await delay(800);
+
       for (let step = 0; step < 80; step += 1) {
         collectVisibleRows();
         if (collected.size >= limit) break;
@@ -1570,15 +2351,14 @@ async function collectProfileListFromDom(tabId, sourceType, maxLeads) {
           lastCount = collected.size;
         }
 
-        if (idlePasses >= 4) break;
+        if (idlePasses >= 6) break;
 
-        if (listRoot instanceof HTMLElement) {
-          listRoot.scrollTop = Math.min(listRoot.scrollHeight, listRoot.scrollTop + Math.max(600, listRoot.clientHeight - 120));
-        } else {
-          dialog.scrollBy({ top: 700, behavior: "instant" });
-        }
+        const listRoot = findListRoot();
+        const scrollAmount = Math.max(400, listRoot.clientHeight - 80);
+        listRoot.scrollTop += scrollAmount;
+        listRoot.dispatchEvent(new Event("scroll", { bubbles: true }));
 
-        await delay(900);
+        await delay(1500);
       }
 
       return {
@@ -1586,11 +2366,16 @@ async function collectProfileListFromDom(tabId, sourceType, maxLeads) {
         debug: {
           scannedCount: collected.size,
           idlePasses,
+          ownerOnlyListNotice,
+          othersSummaryText: othersSummaryMatch?.[0] || "",
         },
       };
     },
   });
 
+  if (result?.error) {
+    await appendScrapeLog(`Profile list script error: ${result.error.message ?? JSON.stringify(result.error)}`);
+  }
   return result?.result ?? { items: [], debug: { scannedCount: 0, idlePasses: 0 } };
 }
 
@@ -1606,7 +2391,7 @@ async function enrichLead(lead, index, total) {
   await appendScrapeLog(`Enriching @${lead.username} (${index + 1}/${total})…`);
 
   const jitter = 5000 + Math.floor(Math.random() * 3000);
-  const tab = await openTabAndWait(lead.profile_url, false);
+  const tab = await openTabAndWait(lead.profile_url, true);
   if (!activeScrapeRuntime) throw new Error("Scrape stopped.");
   activeScrapeRuntime.profileTabId = tab.id;
 
@@ -1637,7 +2422,7 @@ async function enrichLead(lead, index, total) {
 }
 
 async function collectCommentsForScrape(postUrl) {
-  const tab = await openTabAndWait(postUrl, false);
+  const tab = await openTabAndWait(postUrl, true);
   if (!activeScrapeRuntime) throw new Error("Scrape stopped.");
 
   activeScrapeRuntime.postTabId = tab.id;
@@ -1660,7 +2445,8 @@ async function collectCommentsForScrape(postUrl) {
   const domLeads = domPayload.items;
   await appendScrapeLog(
     `DOM collection captured ${domLeads.length} visible commenter(s) ` +
-    `(permalinks: ${domPayload.debug.permalinkCount}, bodyTextLength: ${domPayload.debug.bodyTextLength}).`
+    `(permalinks: ${domPayload.debug.permalinkCount}, bodyTextLength: ${domPayload.debug.bodyTextLength}, ` +
+    `url: ${domPayload.debug.pageUrl}, title: ${domPayload.debug.pageTitle}).`
   );
 
   const networkLeads = Array.from(activeScrapeRuntime.collectedLeadsByUsername.values());
@@ -1683,7 +2469,7 @@ async function collectCommentsForScrape(postUrl) {
 }
 
 async function collectProfileListForScrape(profileUrl, sourceType, maxLeads) {
-  const tab = await openTabAndWait(profileUrl, false);
+  const tab = await openTabAndWait(profileUrl, true);
   if (!activeScrapeRuntime) throw new Error("Scrape stopped.");
 
   activeScrapeRuntime.postTabId = tab.id;
@@ -1693,18 +2479,62 @@ async function collectProfileListForScrape(profileUrl, sourceType, maxLeads) {
   await openProfileListModal(tab.id, sourceType);
   await delay(1200);
 
+  if (sourceType === "followers") {
+    await appendScrapeLog("Checking whether Instagram requires expanding the full followers list…");
+    const expansionResult = await expandFollowersModalIfNeeded(tab.id);
+    if (expansionResult.expanded) {
+      const suffix = expansionResult.timedOut ? " (timed out while waiting for full refresh)" : "";
+      await appendScrapeLog(
+        `Expanded followers list${suffix}: ` +
+        `${expansionResult.beforeCount ?? 0} -> ${expansionResult.afterCount ?? 0} visible profile link(s).`
+      );
+    } else {
+      await appendScrapeLog("No extra 'all followers' action detected; scraping the visible followers list directly.");
+    }
+    await delay(1200);
+  }
+
   const domPayload = await collectProfileListFromDom(tab.id, sourceType, maxLeads);
   domPayload.items.forEach((lead) => {
-    activeScrapeRuntime.collectedLeadsByUsername.set(normalizeText(lead.username), {
-      ...lead,
-      post_url: profileUrl,
-    });
+    const networkProfile = activeScrapeRuntime.profilesByUsername.get(normalizeText(lead.username));
+    const enrichedLead = networkProfile
+      ? {
+          ...lead,
+          post_url: profileUrl,
+          name: networkProfile.name || lead.name || "",
+          bio: networkProfile.bio || "",
+          followers_count: networkProfile.followers_count ?? "",
+          posts_count: networkProfile.posts_count ?? "",
+          is_private: networkProfile.is_private ?? "",
+          is_verified: networkProfile.is_verified ?? lead.is_verified ?? "",
+          is_business_account: networkProfile.is_business_account ?? "",
+          external_links: networkProfile.external_links || "",
+        }
+      : { ...lead, post_url: profileUrl };
+    activeScrapeRuntime.collectedLeadsByUsername.set(normalizeText(lead.username), enrichedLead);
   });
 
+  const networkEnrichedCount = domPayload.items.filter((l) =>
+    activeScrapeRuntime.profilesByUsername.has(normalizeText(l.username))
+  ).length;
+  const isInstagramPreviewLimit =
+    Boolean(domPayload.debug.ownerOnlyListNotice) ||
+    Boolean(domPayload.debug.othersSummaryText);
+  const limitationReason = domPayload.debug.ownerOnlyListNotice
+    ? "Only the account owner can see the full followers list for this profile."
+    : domPayload.debug.othersSummaryText
+      ? `Instagram is showing a preview list (${domPayload.debug.othersSummaryText}) instead of the full ${sourceType} list.`
+      : "";
   await appendScrapeLog(
     `DOM collection captured ${domPayload.items.length} visible ${sourceType} profile(s) ` +
-    `(scanned: ${domPayload.debug.scannedCount}, idle passes: ${domPayload.debug.idlePasses}).`
+    `(scanned: ${domPayload.debug.scannedCount}, idle passes: ${domPayload.debug.idlePasses}, network-enriched: ${networkEnrichedCount}).`
   );
+  if (isInstagramPreviewLimit) {
+    await appendScrapeLog(
+      `Instagram limited this ${sourceType} list for the current session. ` +
+      `${limitationReason} Max leads cannot override this UI restriction.`
+    );
+  }
 
   await chrome.tabs.remove(tab.id).catch(() => {});
   if (activeScrapeRuntime?.postTabId === tab.id) {
@@ -1712,7 +2542,14 @@ async function collectProfileListForScrape(profileUrl, sourceType, maxLeads) {
   }
 
   const leads = dedupeLeadsByUsername(Array.from(activeScrapeRuntime.collectedLeadsByUsername.values())).slice(0, maxLeads);
-  await setScrapeCursor({ phase: "collected", collectedCount: leads.length, enrichedCount: 0 });
+  await setScrapeCursor({
+    phase: "collected",
+    collectedCount: leads.length,
+    enrichedCount: 0,
+    warning: isInstagramPreviewLimit
+      ? `Instagram limited this ${sourceType} list. ${limitationReason}`
+      : "",
+  });
   await appendScrapeLog(`Collected ${leads.length} unique ${sourceType} profile(s).`);
   return leads;
 }
@@ -1756,13 +2593,13 @@ async function runScrapeJob(payload) {
           ...lead,
           source_type: lead.source_type ?? filters.sourceType,
           name: lead.name ?? "",
-          bio: "",
-          followers_count: "",
-          posts_count: "",
-          is_private: "",
+          bio: lead.bio ?? "",
+          followers_count: lead.followers_count ?? "",
+          posts_count: lead.posts_count ?? "",
+          is_private: lead.is_private ?? "",
           is_verified: lead.is_verified ?? "",
-          is_business_account: "",
-          external_links: "",
+          is_business_account: lead.is_business_account ?? "",
+          external_links: lead.external_links ?? "",
         });
       });
       await setScrapeResults(finalResults);
@@ -1815,6 +2652,17 @@ async function runScrapeJob(payload) {
     }
 
     await finalizeScrapeState("done", finalResults);
+    try {
+      const filename = await downloadScrapeCsv({
+        scrapeJob: job,
+        scrapeResults: finalResults,
+        saveAs: true,
+        allowEmpty: true,
+      });
+      await appendScrapeLog(`CSV download dialog opened automatically: ${filename}`);
+    } catch (downloadError) {
+      await appendScrapeLog(`Automatic CSV download failed: ${downloadError.message}`);
+    }
     await appendScrapeLog(`Scrape completed with ${finalResults.length} lead(s).`);
     activeScrapeRuntime = null;
   } catch (error) {
@@ -2066,6 +2914,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }
         }
 
+        if (tabId === activeScrapeRuntime.postTabId &&
+            (activeScrapeRuntime.job.sourceType === "followers" || activeScrapeRuntime.job.sourceType === "following")) {
+          const networkProfiles = extractProfileListFromNetworkPayload(payload.data);
+          networkProfiles.forEach((profile, username) => {
+            if (!activeScrapeRuntime.profilesByUsername.has(username)) {
+              activeScrapeRuntime.profilesByUsername.set(username, profile);
+            }
+          });
+        }
+
         if (tabId === activeScrapeRuntime.profileTabId) {
           const urlMatch = String(payload.url || "").match(/users\/web_profile_info\/?\?username=([^&]+)/i);
           const expectedUsername = decodeURIComponent(urlMatch?.[1] || "");
@@ -2127,20 +2985,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "DOWNLOAD_SCRAPE_CSV") {
     (async () => {
       try {
-        const { scrapeResults = [], scrapeStatus } = await chrome.storage.local.get(["scrapeResults", "scrapeStatus"]);
-        if (!scrapeResults.length) {
-          throw new Error("No scrape results available yet.");
-        }
-
-        const csv = createCsvContent(scrapeResults);
-        const url = createCsvDownloadUrl(csv);
-        const statusSuffix = scrapeStatus === "done" ? "complete" : scrapeStatus || "partial";
-        const filename = `instagram-leads-${statusSuffix}-${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
-
-        await chrome.downloads.download({
-          url,
-          filename,
+        const { scrapeJob = null, scrapeResults = [] } = await chrome.storage.local.get(["scrapeJob", "scrapeResults"]);
+        const filename = await downloadScrapeCsv({
+          scrapeJob,
+          scrapeResults,
           saveAs: true,
+          allowEmpty: false,
         });
         sendResponse({ ok: true, filename });
       } catch (error) {

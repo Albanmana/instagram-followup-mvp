@@ -549,6 +549,7 @@ function renderScrapeStatus(state = {}) {
   const sourceConfig = getScrapeSourceConfig(sourceType);
   const collectedCount = cursor.collectedCount ?? 0;
   const readyCount = scrapeResults.length;
+  const warningMessage = (cursor.warning || "").trim();
 
   scrapeSummary.textContent =
     `Status: ${scrapeStatus ?? "idle"} — ${readyCount} ${sourceConfig.statusLabel}(s) ready`;
@@ -560,8 +561,17 @@ function renderScrapeStatus(state = {}) {
   if (cursor.enrichedCount != null) cursorParts.push(`enriched: ${cursor.enrichedCount}`);
   if (cursor.keptCount != null) cursorParts.push(`ready: ${cursor.keptCount}`);
   if (cursor.totalToEnrich != null) cursorParts.push(`total: ${cursor.totalToEnrich}`);
+  if (warningMessage) cursorParts.push(`warning: ${warningMessage}`);
   if (cursor.error) cursorParts.push(`error: ${cursor.error}`);
   scrapeCursor.textContent = cursorParts.join(" — ") || "No scrape running.";
+  scrapeStatusNode.textContent = warningMessage || "Scraper ready.";
+  scrapeStatusNode.dataset.state = cursor.error
+    ? "error"
+    : warningMessage
+      ? "warning"
+      : scrapeStatus === "done"
+        ? "success"
+        : "idle";
 
   scrapeCollectedCount.textContent = String(collectedCount);
   scrapeReadyCount.textContent = String(readyCount);
@@ -613,7 +623,7 @@ async function loadScrapeStatus() {
     renderScrapeStatus(response);
 
     const filters = response.scrapeFilters || {};
-    setScrapeSourceType(filters.sourceType || "comments");
+    if (filters.sourceType) setScrapeSourceType(filters.sourceType);
     if (filters.postUrl) scrapePostUrlInput.value = filters.postUrl;
     scrapeIncludeInput.value = (filters.includeKeywords || []).join(", ");
     scrapeExcludeInput.value = (filters.excludeKeywords || []).join(", ");
@@ -625,8 +635,16 @@ async function loadScrapeStatus() {
   }
 }
 
+async function pollScrapeStatus() {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "GET_SCRAPE_STATUS" });
+    if (!response?.ok) return;
+    renderScrapeStatus(response);
+  } catch (_) {}
+}
+
 const scrapeStatusInterval = setInterval(() => {
-  loadScrapeStatus().catch(() => {});
+  pollScrapeStatus().catch(() => {});
 }, 2000);
 
 window.addEventListener("unload", () => {
