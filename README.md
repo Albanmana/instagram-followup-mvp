@@ -1,63 +1,30 @@
-# Instagram Follow-Up MVP
+# Cold DM — Sender
 
-This project starts with the smallest useful slice of the Instagram automation app:
+Chrome extension that sends the Instagram messages your Cold DM app has
+prepared, from your own browser, and reports results back to the app.
 
-1. Load a Chrome Manifest V3 extension.
-2. Enter an Instagram handle and a test message.
-3. Open the target profile on Instagram.
-4. Click `Message`.
-5. Insert the text and attempt to send it.
+Architecture: see [docs/architecture.md](docs/architecture.md) and the
+redesign spec in
+[docs/superpowers/specs/2026-07-19-cold-dm-sender-redesign-design.md](docs/superpowers/specs/2026-07-19-cold-dm-sender-redesign-design.md).
 
-The long-term architecture is documented in [docs/architecture.md](/Users/albanpro/claude-code-perso/work/instagram-followup-mvp/docs/architecture.md).
-Reverse-engineered DMTracker notes live in [docs/dmtracker-api-notes.md](/Users/albanpro/claude-code-perso/work/instagram-followup-mvp/docs/dmtracker-api-notes.md).
+## How it works
 
-## Step 1 Scope
+1. The side panel fetches today's send queue from the Cold DM app
+   (`api-client.js` is currently a mock; swap it for real endpoints without
+   touching the UI or the engine).
+2. **Start sending** hands the queue to the send engine (`background.js`),
+   which opens each profile and sends with a safety delay between messages.
+3. Results are reported back to the app, which updates the message tracker.
 
-The current implementation is intentionally narrow:
+## Install unpacked
 
-- No local database yet
-- No follow-up sequencing yet
-- No reply detection yet
-- No scheduler yet
+1. Open `chrome://extensions`, enable Developer mode.
+2. Load unpacked and select the `extension/` folder.
+3. Click the toolbar icon: the side panel opens.
+4. Paste an API key. The mock accepts anything matching `cdm_` plus 8 chars.
 
-It assumes:
+## Development
 
-- Chrome is open
-- The extension is loaded unpacked
-- Instagram is already logged in
-- The target account can receive messages
-
-## Load The Extension
-
-1. Open `chrome://extensions`
-2. Enable `Developer mode`
-3. Click `Load unpacked`
-4. Select `/Users/albanpro/claude-code-perso/work/instagram-followup-mvp/extension`
-
-## Test Flow
-
-1. Click the extension icon.
-2. Enter a handle without `@`.
-3. Enter a short test message.
-4. Click `Send test message`.
-5. Watch the status text in the popup.
-6. Click `Show latest logs` if the run stalls or fails.
-
-## Debugging
-
-There are now three useful places to inspect behavior:
-
-1. The popup status text
-2. The popup `Show latest logs` button
-3. Chrome extension service worker logs
-
-To inspect the service worker logs:
-
-1. Open `chrome://extensions`
-2. Find `Instagram Follow-Up MVP`
-3. Click `Service Worker`
-4. Read the console output
-
-You can also open DevTools on the Instagram tab itself to inspect injected page-side logs.
-
-If Instagram's UI changes, the extension will likely fail with a stage-specific error instead of silently doing nothing.
+- Tests for the mocked API client: `node --test`
+- The legacy popup UI is archived in `extension/archive/`.
+- Raw engine details: side panel → Settings → Advanced → Show raw logs.

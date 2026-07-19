@@ -3110,3 +3110,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return false;
 });
+
+// Open the side panel when the toolbar icon is clicked (Cold DM — Sender UI).
+chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cold DM — Sender</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="logo" aria-hidden="true">C</div>
+      <div class="header-text">
+        <h1>Cold DM — Sender</h1>
+        <p id="header-status" class="header-status">Not connected</p>
+      </div>
+      <button id="settings-button" class="icon-button" type="button" title="Settings" aria-label="Settings">
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" />
+          <path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.04.04a2.1 2.1 0 0 1-2.97 2.97l-.04-.04a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.1 1.66V21.4a2.1 2.1 0 0 1-4.2 0v-.15a1.8 1.8 0 0 0-1.1-1.66 1.8 1.8 0 0 0-1.98.36l-.04.04a2.1 2.1 0 0 1-2.97-2.97l.04-.04A1.8 1.8 0 0 0 3.8 15a1.8 1.8 0 0 0-1.66-1.1H2a2.1 2.1 0 0 1 0-4.2h.15A1.8 1.8 0 0 0 3.8 8.6a1.8 1.8 0 0 0-.36-1.98l-.04-.04a2.1 2.1 0 0 1 2.97-2.97l.04.04a1.8 1.8 0 0 0 1.98.36 1.8 1.8 0 0 0 1.1-1.66V2.2a2.1 2.1 0 0 1 4.2 0v.15a1.8 1.8 0 0 0 1.1 1.66 1.8 1.8 0 0 0 1.98-.36l.04-.04a2.1 2.1 0 0 1 2.97 2.97l-.04.04a1.8 1.8 0 0 0-.36 1.98 1.8 1.8 0 0 0 1.66 1.1h.15a2.1 2.1 0 0 1 0 4.2h-.15A1.8 1.8 0 0 0 19.4 15Z" />
+        </svg>
+      </button>
+    </header>
+
+    <main>
+      <section id="view-connect" hidden>
+        <div class="card">
+          <h2>Connect your account</h2>
+          <p class="muted">Paste the API key from your Cold DM app settings.</p>
+          <label class="field">
+            <span class="label">API key</span>
+            <input id="api-key-input" type="password" placeholder="cdm_..." autocomplete="off" />
+          </label>
+          <p id="connect-error" class="error-text" hidden></p>
+          <button id="connect-button" class="primary" type="button">Connect</button>
+        </div>
+      </section>
+
+      <section id="view-main" hidden>
+        <div class="tabs" role="tablist" aria-label="Sender sections">
+          <button id="tab-today-button" class="tab is-active" type="button" role="tab" aria-controls="tab-today">Today</button>
+          <button id="tab-history-button" class="tab" type="button" role="tab" aria-controls="tab-history">History</button>
+        </div>
+
+        <div id="tab-today" role="tabpanel">
+          <div id="login-banner" class="banner amber" hidden>
+            Log in to Instagram in this browser, then resume.
+          </div>
+
+          <div id="queue-card" class="card" hidden>
+            <span class="label">Today's queue</span>
+            <p id="queue-count" class="big">0 messages</p>
+            <p id="queue-campaign" class="muted"></p>
+            <button id="start-button" class="primary with-icon" type="button">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 5v14l11-7-11-7Z" /></svg>
+              Start sending
+            </button>
+          </div>
+
+          <div id="empty-card" class="card center" hidden>
+            <p class="big success-mark">✓</p>
+            <p><b>You're all caught up</b></p>
+            <p class="muted">No messages scheduled today.</p>
+          </div>
+
+          <div id="run-card" class="card" hidden>
+            <div class="row space-between">
+              <span class="label">Progress</span>
+              <span id="run-pill" class="pill amber">0 / 0</span>
+            </div>
+            <div class="progress"><i id="run-progress-bar"></i></div>
+            <p id="run-next" class="muted"></p>
+            <div class="row">
+              <button id="pause-button" class="ghost with-icon" type="button">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 5h4v14H7V5Zm6 0h4v14h-4V5Z" /></svg>
+                Pause
+              </button>
+              <button id="resume-button" class="primary with-icon" type="button" hidden>
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 5v14l11-7-11-7Z" /></svg>
+                Resume
+              </button>
+              <button id="stop-button" class="danger with-icon" type="button">
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6h12v12H6V6Z" /></svg>
+                Stop
+              </button>
+            </div>
+          </div>
+
+          <div id="list-card" class="card" hidden>
+            <span id="list-title" class="label">Recipients</span>
+            <ul id="recipient-list" class="lead-list"></ul>
+          </div>
+        </div>
+
+        <div id="tab-history" role="tabpanel" hidden>
+          <div class="card">
+            <span class="label">Past sends</span>
+            <ul id="history-list" class="lead-list"></ul>
+            <p id="history-empty" class="muted center" hidden>Nothing sent yet.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-settings" hidden>
+        <div class="card">
+          <h2>Settings</h2>
+          <label class="field">
+            <span class="label">Delay between messages (seconds)</span>
+            <input id="delay-input" type="number" min="60" max="3600" value="400" />
+          </label>
+          <label class="field">
+            <span class="label">API key</span>
+            <input id="settings-api-key" type="password" autocomplete="off" />
+          </label>
+          <div class="row">
+            <button id="settings-save-button" class="primary" type="button">Save</button>
+            <button id="settings-back-button" class="ghost" type="button">Back</button>
+          </div>
+          <p id="settings-status" class="muted" hidden></p>
+        </div>
+        <div class="card">
+          <span class="label">Advanced</span>
+          <p class="muted">Technical details for support.</p>
+          <button id="show-logs-button" class="ghost" type="button">Show raw logs</button>
+          <pre id="raw-logs" class="logs" hidden></pre>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

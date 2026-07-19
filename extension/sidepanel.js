@@ -1,0 +1,455 @@
+import { createApiClient, chromeStorageAdapter } from "./api-client.js";
+
+const api = createApiClient({ storage: chromeStorageAdapter });
+const $ = (id) => document.getElementById(id);
+
+const DEFAULT_DELAY_SECONDS = 400;
+const state = { queue: null, nextSendAt: null, pausedItems: null };
+
+let pollTimer = null;
+let countdownTimer = null;
+let lastSeenIndex = -1;
+
+function showView(name) {
+  $("view-connect").hidden = name !== "connect";
+  $("view-main").hidden = name !== "main";
+  $("view-settings").hidden = name !== "settings";
+}
+
+function setHeaderStatus(text, tone = "") {
+  const el = $("header-status");
+  el.textContent = text;
+  el.className = `header-status ${tone}`.trim();
+}
+
+function showTab(name) {
+  $("tab-today").hidden = name !== "today";
+  $("tab-history").hidden = name !== "history";
+  $("tab-today-button").classList.toggle("is-active", name === "today");
+  $("tab-history-button").classList.toggle("is-active", name === "history");
+  $("tab-today-button").setAttribute("aria-selected", String(name === "today"));
+  $("tab-history-button").setAttribute("aria-selected", String(name === "history"));
+}
+
+async function getSettings() {
+  const {
+    coldDmApiKey = "",
+    coldDmAccount = "",
+    sendDelaySeconds = DEFAULT_DELAY_SECONDS
+  } = await chrome.storage.local.get(["coldDmApiKey", "coldDmAccount", "sendDelaySeconds"]);
+  return { coldDmApiKey, coldDmAccount, sendDelaySeconds };
+}
+
+async function connect(key) {
+  const result = await api.verifyApiKey(key);
+  if (!result.ok) return result;
+  await chrome.storage.local.set({ coldDmApiKey: key, coldDmAccount: result.account });
+  return result;
+}
+
+function initials(handle) {
+  return handle.replace(/^@+/, "").slice(0, 2).toUpperCase();
+}
+
+function messagePreview(message) {
+  return message.length > 45 ? `${message.slice(0, 45)}...` : message;
+}
+
+function renderList(entries) {
+  const list = $("recipient-list");
+  list.innerHTML = "";
+
+  for (const entry of entries) {
+    const li = document.createElement("li");
+    if (entry.current) li.className = "current";
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.textContent = initials(entry.handle);
+
+    const who = document.createElement("div");
+    who.className = "who";
+
+    const name = document.createElement("b");
+    name.textContent = `@${entry.handle}`;
+
+    const sub = document.createElement("span");
+    sub.textContent = entry.sub ?? "";
+
+    const status = document.createElement("span");
+    status.className = `status ${entry.statusClass}`;
+    status.textContent = entry.status;
+
+    who.append(name, sub);
+    li.append(avatar, who, status);
+    list.appendChild(li);
+  }
+
+  $("list-card").hidden = entries.length === 0;
+}
+
+async function checkInstagramLogin() {
+  const cookie = await chrome.cookies.get({
+    url: "https://www.instagram.com",
+    name: "sessionid"
+  });
+  return Boolean(cookie?.value);
+}
+
+async function startRun(items) {
+  const loggedIn = await checkInstagramLogin();
+  if (!loggedIn) {
+    $("login-banner").hidden = false;
+    return;
+  }
+
+  $("login-banner").hidden = true;
+  const { sendDelaySeconds } = await getSettings();
+  const rows = items.map((item) => ({ handle: item.handle, message: item.message }));
+  const response = await chrome.runtime.sendMessage({
+    type: "START_BATCH",
+    payload: { rows, delaySeconds: sendDelaySeconds }
+  });
+
+  if (!response?.ok) {
+    setHeaderStatus(`Could not start: ${response?.error ?? "unknown error"}`, "");
+    return;
+  }
+
+  await chrome.action.setBadgeBackgroundColor({ color: "#17714F" });
+  await chrome.action.setBadgeText({ text: "▶" });
+  state.nextSendAt = Date.now() + sendDelaySeconds * 1000;
+  lastSeenIndex = -1;
+  await refreshToday();
+}
+
+function showIdleQueue(queue) {
+  stopTimers();
+  $("run-card").hidden = true;
+
+  if (queue.items.length === 0) {
+    $("queue-card").hidden = true;
+    $("empty-card").hidden = false;
+    renderList([]);
+    return;
+  }
+
+  $("empty-card").hidden = true;
+  $("queue-card").hidden = false;
+  $("queue-count").textContent = `${queue.items.length} message${queue.items.length === 1 ? "" : "s"}`;
+  $("queue-campaign").textContent = `Campaign "${queue.campaign}" · prepared by Cold DM`;
+  $("list-title").textContent = "Recipients";
+  renderList(
+    queue.items.map((item) => ({
+      handle: item.handle,
+      sub: messagePreview(item.message),
+      status: "Pending",
+      statusClass: "wait"
+    }))
+  );
+}
+
+async function refreshToday() {
+  const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
+  if (engine?.ok && engine.batchStatus === "running") {
+    renderRun(engine);
+    return;
+  }
+
+  const { pausedItems } = await chrome.storage.local.get("pausedItems");
+  if (Array.isArray(pausedItems) && pausedItems.length > 0) {
+    state.pausedItems = pausedItems;
+    $("queue-card").hidden = true;
+    $("empty-card").hidden = true;
+    $("run-card").hidden = false;
+    $("pause-button").hidden = true;
+    $("resume-button").hidden = false;
+    $("run-next").textContent = `Paused — ${pausedItems.length} message(s) remaining.`;
+    setHeaderStatus("● Paused", "run");
+    $("list-title").textContent = "Run";
+    renderList(pausedItems.map((item) => ({ handle: item.handle, sub: "-", status: "Pending", statusClass: "wait" })));
+    return;
+  }
+
+  await chrome.action.setBadgeText({ text: "" });
+  state.queue = await api.fetchQueue();
+  showIdleQueue(state.queue);
+}
+
+function stopTimers() {
+  clearInterval(pollTimer);
+  clearInterval(countdownTimer);
+  pollTimer = null;
+  countdownTimer = null;
+}
+
+function readableReason(error) {
+  const text = String(error ?? "");
+  if (/not.?found|no such user|unavailable/i.test(text)) return "Profile not found";
+  if (/message button|button/i.test(text)) return "Could not open the conversation";
+  if (/login|logged/i.test(text)) return "Instagram session expired";
+  return "Could not send";
+}
+
+function statusEntry(row, log, isCurrent) {
+  if (log?.status === "sent") {
+    return {
+      handle: row.handle,
+      sub: `Sent at ${new Date(log.at).toLocaleTimeString()}`,
+      status: "✓ Sent",
+      statusClass: "ok"
+    };
+  }
+
+  if (log?.status === "error") {
+    return {
+      handle: row.handle,
+      sub: readableReason(log.error),
+      status: "✗ Failed",
+      statusClass: "fail"
+    };
+  }
+
+  if (isCurrent) {
+    return { handle: row.handle, sub: "Sending...", status: "● Sending", statusClass: "run", current: true };
+  }
+
+  return { handle: row.handle, sub: "-", status: "Pending", statusClass: "wait" };
+}
+
+function renderRun(engine) {
+  const { batchQueue = [], batchIndex = 0, batchLogs = [], batchDelay } = engine;
+  const total = batchQueue.length;
+  const doneCount = Math.min(batchIndex, total);
+
+  $("queue-card").hidden = true;
+  $("empty-card").hidden = true;
+  $("run-card").hidden = false;
+  $("pause-button").hidden = false;
+  $("resume-button").hidden = true;
+  setHeaderStatus("● Sending", "run");
+
+  $("run-pill").textContent = `${doneCount} / ${total}`;
+  $("run-pill").className = `pill ${doneCount === total ? "green" : "amber"}`;
+  $("run-progress-bar").style.width = `${total === 0 ? 0 : Math.round((doneCount / total) * 100)}%`;
+
+  if (batchIndex !== lastSeenIndex) {
+    lastSeenIndex = batchIndex;
+    state.nextSendAt = Date.now() + (batchDelay ?? DEFAULT_DELAY_SECONDS) * 1000;
+  }
+
+  const logByHandle = new Map(batchLogs.map((log) => [log.handle, log]));
+  $("list-title").textContent = "Run";
+  renderList(batchQueue.map((row, index) => statusEntry(row, logByHandle.get(row.handle), index === batchIndex)));
+  renderCountdown();
+
+  if (!pollTimer) {
+    pollTimer = setInterval(pollEngine, 2000);
+    countdownTimer = setInterval(renderCountdown, 1000);
+  }
+}
+
+function renderCountdown() {
+  if (!state.nextSendAt) return;
+
+  const ms = state.nextSendAt - Date.now();
+  if (ms <= 0) {
+    $("run-next").textContent = "Sending next message...";
+    return;
+  }
+
+  const minutes = Math.floor(ms / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
+  $("run-next").textContent = `Next send in ${minutes} min ${String(seconds).padStart(2, "0")} s — safety delay between messages.`;
+}
+
+async function pollEngine() {
+  const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
+  if (!engine?.ok) return;
+
+  if (engine.batchStatus === "running") {
+    const lastLog = engine.batchLogs?.[engine.batchLogs.length - 1];
+    if (lastLog?.status === "error" && readableReason(lastLog.error) === "Instagram session expired") {
+      $("login-banner").hidden = false;
+      await pauseRun();
+      return;
+    }
+    renderRun(engine);
+    return;
+  }
+
+  stopTimers();
+  await reportEngineLogs(engine.batchLogs ?? []);
+  await chrome.action.setBadgeText({ text: "" });
+  const { coldDmAccount } = await getSettings();
+  setHeaderStatus(`● Connected · ${coldDmAccount}`, "ok");
+  await refreshToday();
+}
+
+async function reportEngineLogs(batchLogs) {
+  const results = batchLogs.map((log) => ({
+    handle: log.handle,
+    status: log.status === "sent" ? "sent" : "failed",
+    reason: log.status === "sent" ? undefined : readableReason(log.error),
+    at: log.at
+  }));
+
+  if (results.length > 0) await api.reportResults(results);
+}
+
+async function pauseRun() {
+  const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
+  await chrome.runtime.sendMessage({ type: "STOP_BATCH" });
+  stopTimers();
+  await reportEngineLogs(engine?.batchLogs ?? []);
+  state.pausedItems = (engine?.batchQueue ?? []).slice(engine?.batchIndex ?? 0);
+  await chrome.storage.local.set({ pausedItems: state.pausedItems });
+  $("pause-button").hidden = true;
+  $("resume-button").hidden = false;
+  $("run-next").textContent = `Paused — ${state.pausedItems.length} message(s) remaining.`;
+  setHeaderStatus("● Paused", "run");
+}
+
+async function renderHistory() {
+  const history = await api.getHistory();
+  const list = $("history-list");
+  list.innerHTML = "";
+  $("history-empty").hidden = history.length > 0;
+
+  for (const entry of history.slice(0, 100)) {
+    const li = document.createElement("li");
+
+    const avatar = document.createElement("div");
+    avatar.className = "avatar";
+    avatar.textContent = initials(entry.handle);
+
+    const who = document.createElement("div");
+    who.className = "who";
+
+    const name = document.createElement("b");
+    name.textContent = `@${entry.handle}`;
+
+    const sub = document.createElement("span");
+    const day = new Date(entry.at);
+    sub.textContent = `${day.toLocaleDateString()} ${day.toLocaleTimeString()}${entry.reason ? ` · ${entry.reason}` : ""}`;
+
+    const status = document.createElement("span");
+    status.className = `status ${entry.status === "sent" ? "ok" : "fail"}`;
+    status.textContent = entry.status === "sent" ? "✓ Sent" : "✗ Failed";
+
+    who.append(name, sub);
+    li.append(avatar, who, status);
+    list.appendChild(li);
+  }
+}
+
+$("connect-button").addEventListener("click", async () => {
+  const key = $("api-key-input").value.trim();
+  $("connect-error").hidden = true;
+  $("connect-button").disabled = true;
+  const result = await connect(key);
+  $("connect-button").disabled = false;
+
+  if (!result.ok) {
+    $("connect-error").textContent = result.error;
+    $("connect-error").hidden = false;
+    return;
+  }
+
+  await enterMain();
+});
+
+$("settings-button").addEventListener("click", async () => {
+  const settings = await getSettings();
+  $("settings-api-key").value = settings.coldDmApiKey;
+  $("delay-input").value = settings.sendDelaySeconds;
+  $("settings-status").hidden = true;
+  $("raw-logs").hidden = true;
+  showView("settings");
+});
+
+$("settings-back-button").addEventListener("click", () => enterMain());
+
+$("settings-save-button").addEventListener("click", async () => {
+  const key = $("settings-api-key").value.trim();
+  const delay = Math.min(3600, Math.max(60, parseInt($("delay-input").value, 10) || DEFAULT_DELAY_SECONDS));
+  const result = await connect(key);
+
+  if (!result.ok) {
+    $("settings-status").textContent = result.error;
+    $("settings-status").hidden = false;
+    return;
+  }
+
+  await chrome.storage.local.set({ sendDelaySeconds: delay });
+  $("settings-status").textContent = "Saved.";
+  $("settings-status").hidden = false;
+});
+
+$("show-logs-button").addEventListener("click", async () => {
+  const response = await chrome.runtime.sendMessage({ type: "GET_RUN_LOGS" });
+  $("raw-logs").textContent = JSON.stringify(response?.logs ?? [], null, 2);
+  $("raw-logs").hidden = false;
+});
+
+$("tab-today-button").addEventListener("click", () => showTab("today"));
+$("tab-history-button").addEventListener("click", async () => {
+  showTab("history");
+  await renderHistory();
+});
+
+$("start-button").addEventListener("click", async () => {
+  if (!state.queue || state.queue.items.length === 0) return;
+  $("start-button").disabled = true;
+  await startRun(state.queue.items);
+  $("start-button").disabled = false;
+});
+
+$("pause-button").addEventListener("click", pauseRun);
+
+$("resume-button").addEventListener("click", async () => {
+  const items = state.pausedItems ?? [];
+  state.pausedItems = null;
+  await chrome.storage.local.set({ pausedItems: null });
+  lastSeenIndex = -1;
+  await startRun(items);
+});
+
+$("stop-button").addEventListener("click", async () => {
+  const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
+  await chrome.runtime.sendMessage({ type: "STOP_BATCH" });
+  stopTimers();
+  await reportEngineLogs(engine?.batchLogs ?? []);
+  state.pausedItems = null;
+  await chrome.storage.local.set({ pausedItems: null });
+  await chrome.action.setBadgeText({ text: "" });
+  const { coldDmAccount } = await getSettings();
+  setHeaderStatus(`● Connected · ${coldDmAccount}`, "ok");
+  await refreshToday();
+});
+
+async function enterMain() {
+  const settings = await getSettings();
+  setHeaderStatus(`● Connected · ${settings.coldDmAccount}`, "ok");
+  showView("main");
+  showTab("today");
+  await refreshToday();
+}
+
+async function boot() {
+  const settings = await getSettings();
+  if (!settings.coldDmApiKey) {
+    setHeaderStatus("Not connected");
+    showView("connect");
+    return;
+  }
+
+  const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
+  if (engine?.ok && engine.batchStatus !== "running" && (engine.batchLogs ?? []).length > 0) {
+    await reportEngineLogs(engine.batchLogs);
+  }
+
+  await enterMain();
+}
+
+boot();

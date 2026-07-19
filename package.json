@@ -1,0 +1,9 @@
+{
+  "name": "cold-dm-sender-extension",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

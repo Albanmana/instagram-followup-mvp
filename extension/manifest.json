@@ -1,14 +1,21 @@
 {
   "manifest_version": 3,
-  "name": "Instagram Follow-Up MVP",
-  "version": "0.1.0",
-  "description": "Minimal MV3 extension that opens Instagram and sends a test message.",
+  "name": "Cold DM — Sender",
+  "version": "0.2.0",
+  "description": "Sends the Instagram messages your Cold DM app has prepared, right from your own browser.",
+  "icons": {
+    "16": "assets/icon16.png",
+    "48": "assets/icon48.png",
+    "128": "assets/icon128.png"
+  },
   "permissions": [
     "tabs",
     "scripting",
     "storage",
     "alarms",
-    "downloads"
+    "downloads",
+    "sidePanel",
+    "cookies"
   ],
   "host_permissions": [
     "https://www.instagram.com/*",
@@ -41,12 +48,15 @@
       "run_at": "document_start"
     }
   ],
-  "options_ui": {
-    "page": "settings.html",
-    "open_in_tab": true
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "action": {
-    "default_title": "Instagram Follow-Up MVP",
-    "default_popup": "popup.html"
+    "default_title": "Cold DM — Sender",
+    "default_icon": {
+      "16": "assets/icon16.png",
+      "48": "assets/icon48.png",
+      "128": "assets/icon128.png"
+    }
   }
 }
