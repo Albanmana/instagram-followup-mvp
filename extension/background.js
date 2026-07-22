@@ -1300,10 +1300,14 @@ async function processBatchItem(index) {
 
   try {
     await sendTestMessage({ handle, message, has_gif, gif_query });
-    await appendBatchLog({ handle, status: "sent", at: new Date().toISOString() });
+    await appendBatchLog({ actionId: row.actionId, messageId: row.messageId, leadId: row.leadId, messageType: row.messageType, handle, status: "sent", at: new Date().toISOString() });
     await callMarkDone(row);
   } catch (error) {
     await appendBatchLog({
+      actionId: row.actionId,
+      messageId: row.messageId,
+      leadId: row.leadId,
+      messageType: row.messageType,
       handle,
       status: "error",
       error: error.message,

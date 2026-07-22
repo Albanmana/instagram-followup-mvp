@@ -1,6 +1,6 @@
 import { createApiClient, chromeStorageAdapter } from "./api-client.js";
 
-const api = createApiClient({ storage: chromeStorageAdapter });
+const api = createApiClient({ storage: chromeStorageAdapter, baseUrl: "" });
 const $ = (id) => document.getElementById(id);
 
 const DEFAULT_DELAY_SECONDS = 400;
@@ -35,9 +35,10 @@ async function getSettings() {
   const {
     coldDmApiKey = "",
     coldDmAccount = "",
+    coldDmBaseUrl = "",
     sendDelaySeconds = DEFAULT_DELAY_SECONDS
-  } = await chrome.storage.local.get(["coldDmApiKey", "coldDmAccount", "sendDelaySeconds"]);
-  return { coldDmApiKey, coldDmAccount, sendDelaySeconds };
+  } = await chrome.storage.local.get(["coldDmApiKey", "coldDmAccount", "coldDmBaseUrl", "sendDelaySeconds"]);
+  return { coldDmApiKey, coldDmAccount, coldDmBaseUrl, sendDelaySeconds };
 }
 
 async function connect(key) {
@@ -105,7 +106,13 @@ async function startRun(items) {
 
   $("login-banner").hidden = true;
   const { sendDelaySeconds } = await getSettings();
-  const rows = items.map((item) => ({ handle: item.handle, message: item.message }));
+  const claimed = await api.claimQueue(items);
+  if (!claimed?.items?.length) {
+    setHeaderStatus("Queue claim failed — refresh and try again", "");
+    return;
+  }
+  const claimedIds = new Set(claimed.items.map((item) => item.id ?? item.actionId));
+  const rows = items.filter((item) => claimedIds.has(item.actionId)).map((item) => ({ ...item, handle: item.handle, message: item.message }));
   const response = await chrome.runtime.sendMessage({
     type: "START_BATCH",
     payload: { rows, delaySeconds: sendDelaySeconds }
@@ -288,6 +295,10 @@ async function pollEngine() {
 
 async function reportEngineLogs(batchLogs) {
   const results = batchLogs.map((log) => ({
+    actionId: log.actionId,
+    messageId: log.messageId,
+    leadId: log.leadId,
+    messageType: log.messageType ?? "first_dm",
     handle: log.handle,
     status: log.status === "sent" ? "sent" : "failed",
     reason: log.status === "sent" ? undefined : readableReason(log.error),
@@ -362,6 +373,7 @@ $("connect-button").addEventListener("click", async () => {
 $("settings-button").addEventListener("click", async () => {
   const settings = await getSettings();
   $("settings-api-key").value = settings.coldDmApiKey;
+  $("settings-base-url").value = settings.coldDmBaseUrl;
   $("delay-input").value = settings.sendDelaySeconds;
   $("settings-status").hidden = true;
   $("raw-logs").hidden = true;
@@ -372,6 +384,7 @@ $("settings-back-button").addEventListener("click", () => enterMain());
 
 $("settings-save-button").addEventListener("click", async () => {
   const key = $("settings-api-key").value.trim();
+  const baseUrl = $("settings-base-url").value.trim();
   const delay = Math.min(3600, Math.max(60, parseInt($("delay-input").value, 10) || DEFAULT_DELAY_SECONDS));
   const result = await connect(key);
 
@@ -381,7 +394,7 @@ $("settings-save-button").addEventListener("click", async () => {
     return;
   }
 
-  await chrome.storage.local.set({ sendDelaySeconds: delay });
+  await chrome.storage.local.set({ sendDelaySeconds: delay, coldDmBaseUrl: baseUrl });
   $("settings-status").textContent = "Saved.";
   $("settings-status").hidden = false;
 });
