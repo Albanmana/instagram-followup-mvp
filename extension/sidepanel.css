@@ -171,6 +171,19 @@ input:focus-visible {
   text-align: center;
 }
 
+.queue-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.queue-toolbar .muted {
+  margin: 0;
+  font-size: 12px;
+}
+
 .label {
   display: block;
   margin-bottom: 6px;

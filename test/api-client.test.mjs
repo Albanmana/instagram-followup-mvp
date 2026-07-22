@@ -71,3 +71,28 @@ test("getHistory returns newest first", async () => {
   assert.equal(history[0].handle, "newer");
   assert.equal(history[1].handle, "older");
 });
+
+test("claimQueue normalizes the Cold DM claimed action IDs", async () => {
+  const storage = memoryStorage({ coldDmApiKey: "cdm_live_test", coldDmBaseUrl: "https://cold-dm.example" });
+  const api = createApiClient({
+    storage,
+    baseUrl: "https://cold-dm.example",
+    fetchFn: async () => new Response(JSON.stringify({ claimed: ["action-1"], skipped: ["action-2"] }), { status: 200 })
+  });
+  const result = await api.claimQueue([{ actionId: "action-1" }, { actionId: "action-2" }]);
+  assert.deepEqual(result, { claimed: ["action-1"], skipped: ["action-2"] });
+});
+
+test("fetchQueue preserves first-DM and follow-up message types", async () => {
+  const storage = memoryStorage({ coldDmApiKey: "cdm_live_test", coldDmBaseUrl: "https://cold-dm.example" });
+  const api = createApiClient({
+    storage,
+    baseUrl: "https://cold-dm.example",
+    fetchFn: async () => new Response(JSON.stringify({ campaigns: [{ campaign: { id: "campaign-1", name: "Campaign" }, items: [
+      { actionId: "action-1", messageId: "message-1", leadId: "lead-1", handle: "first", message: "Hello", messageType: "first_dm" },
+      { actionId: "action-2", messageId: "message-2", leadId: "lead-2", handle: "follow", message: "Checking in", messageType: "followup" }
+    ] }] }), { status: 200 })
+  });
+  const queue = await api.fetchQueue();
+  assert.deepEqual(queue.items.map((item) => item.messageType), ["first_dm", "followup"]);
+});

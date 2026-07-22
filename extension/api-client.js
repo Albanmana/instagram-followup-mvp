@@ -32,7 +32,11 @@ export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, 
   async function verifyApiKey(key) {
     const value = (key ?? "").trim();
     if (!value) return { ok: false, error: "API key is required" };
-    if (mockMode) return { ok: true, account: "Cold DM app (local mock)" };
+    if (mockMode) {
+      return /^cdm_[A-Za-z0-9_]+$/.test(value)
+        ? { ok: true, account: "Cold DM app (local mock)" }
+        : { ok: false, error: "Invalid API key" };
+    }
     try {
       const credentials = await storage.get("coldDmBaseUrl");
       const url = baseUrl || credentials.coldDmBaseUrl || defaultBaseUrl;
@@ -62,8 +66,12 @@ export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, 
   }
 
   async function claimQueue(items) {
-    if (mockMode) return { items };
-    return request("/api/ext/v1/queue/claim", { method: "POST", body: JSON.stringify({ actionIds: items.map((item) => item.actionId) }) });
+    if (mockMode) return { claimed: items.map((item) => item.actionId), skipped: [] };
+    const response = await request("/api/ext/v1/queue/claim", { method: "POST", body: JSON.stringify({ actionIds: items.map((item) => item.actionId) }) });
+    return {
+      claimed: Array.isArray(response.claimed) ? response.claimed : [],
+      skipped: Array.isArray(response.skipped) ? response.skipped : []
+    };
   }
 
   async function reportResults(results) {

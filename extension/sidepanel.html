@@ -42,6 +42,10 @@
         </div>
 
         <div id="tab-today" role="tabpanel">
+          <div class="queue-toolbar">
+            <span id="queue-sync-status" class="muted">Queue not refreshed yet.</span>
+            <button id="refresh-queue-button" class="ghost" type="button">Refresh queue</button>
+          </div>
           <div id="login-banner" class="banner amber" hidden>
             Log in to Instagram in this browser, then resume.
           </div>
@@ -106,6 +110,16 @@
           <label class="field">
             <span class="label">Delay between messages (seconds)</span>
             <input id="delay-input" type="number" min="60" max="3600" value="400" />
+          </label>
+          <label class="field">
+            <span class="label">Queue refresh interval</span>
+            <select id="queue-polling-hours-input">
+              <option value="1">Every hour</option>
+              <option value="3">Every 3 hours</option>
+              <option value="6">Every 6 hours</option>
+              <option value="12">Every 12 hours</option>
+              <option value="24">Every 24 hours</option>
+            </select>
           </label>
           <label class="field">
             <span class="label">API key</span>

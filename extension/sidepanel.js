@@ -4,10 +4,12 @@ const api = createApiClient({ storage: chromeStorageAdapter, baseUrl: "" });
 const $ = (id) => document.getElementById(id);
 
 const DEFAULT_DELAY_SECONDS = 400;
+const DEFAULT_QUEUE_POLLING_HOURS = 3;
 const state = { queue: null, nextSendAt: null, pausedItems: null };
 
 let pollTimer = null;
 let countdownTimer = null;
+let queuePollTimer = null;
 let lastSeenIndex = -1;
 
 function showView(name) {
@@ -36,9 +38,10 @@ async function getSettings() {
     coldDmApiKey = "",
     coldDmAccount = "",
     coldDmBaseUrl = "",
-    sendDelaySeconds = DEFAULT_DELAY_SECONDS
-  } = await chrome.storage.local.get(["coldDmApiKey", "coldDmAccount", "coldDmBaseUrl", "sendDelaySeconds"]);
-  return { coldDmApiKey, coldDmAccount, coldDmBaseUrl, sendDelaySeconds };
+    sendDelaySeconds = DEFAULT_DELAY_SECONDS,
+    queuePollingHours = DEFAULT_QUEUE_POLLING_HOURS
+  } = await chrome.storage.local.get(["coldDmApiKey", "coldDmAccount", "coldDmBaseUrl", "sendDelaySeconds", "queuePollingHours"]);
+  return { coldDmApiKey, coldDmAccount, coldDmBaseUrl, sendDelaySeconds, queuePollingHours };
 }
 
 async function connect(key) {
@@ -54,6 +57,29 @@ function initials(handle) {
 
 function messagePreview(message) {
   return message.length > 45 ? `${message.slice(0, 45)}...` : message;
+}
+
+function messageTypeLabel(messageType) {
+  return messageType === "followup" ? "Follow-up" : "First DM";
+}
+
+function clearQueuePolling() {
+  clearInterval(queuePollTimer);
+  queuePollTimer = null;
+}
+
+async function scheduleQueuePolling() {
+  clearQueuePolling();
+  if (!state.queue || state.pausedItems?.length) return;
+  const { queuePollingHours } = await getSettings();
+  const hours = [1, 3, 6, 12, 24].includes(Number(queuePollingHours)) ? Number(queuePollingHours) : DEFAULT_QUEUE_POLLING_HOURS;
+  queuePollTimer = setInterval(() => refreshToday({ automatic: true }), hours * 60 * 60 * 1000);
+}
+
+function setQueueSyncStatus(text, isError = false) {
+  const element = $("queue-sync-status");
+  element.textContent = text;
+  element.classList.toggle("error-text", isError);
 }
 
 function renderList(entries) {
@@ -105,13 +131,14 @@ async function startRun(items) {
   }
 
   $("login-banner").hidden = true;
+  clearQueuePolling();
   const { sendDelaySeconds } = await getSettings();
   const claimed = await api.claimQueue(items);
-  if (!claimed?.items?.length) {
+  if (!claimed?.claimed?.length) {
     setHeaderStatus("Queue claim failed — refresh and try again", "");
     return;
   }
-  const claimedIds = new Set(claimed.items.map((item) => item.id ?? item.actionId));
+  const claimedIds = new Set(claimed.claimed);
   const rows = items.filter((item) => claimedIds.has(item.actionId)).map((item) => ({ ...item, handle: item.handle, message: item.message }));
   const response = await chrome.runtime.sendMessage({
     type: "START_BATCH",
@@ -149,22 +176,24 @@ function showIdleQueue(queue) {
   renderList(
     queue.items.map((item) => ({
       handle: item.handle,
-      sub: messagePreview(item.message),
+      sub: `${messageTypeLabel(item.messageType)} · ${messagePreview(item.message)}`,
       status: "Pending",
       statusClass: "wait"
     }))
   );
 }
 
-async function refreshToday() {
+async function refreshToday({ automatic = false } = {}) {
   const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
   if (engine?.ok && engine.batchStatus === "running") {
+    clearQueuePolling();
     renderRun(engine);
     return;
   }
 
   const { pausedItems } = await chrome.storage.local.get("pausedItems");
   if (Array.isArray(pausedItems) && pausedItems.length > 0) {
+    clearQueuePolling();
     state.pausedItems = pausedItems;
     $("queue-card").hidden = true;
     $("empty-card").hidden = true;
@@ -178,9 +207,22 @@ async function refreshToday() {
     return;
   }
 
-  await chrome.action.setBadgeText({ text: "" });
-  state.queue = await api.fetchQueue();
-  showIdleQueue(state.queue);
+  const button = $("refresh-queue-button");
+  try {
+    button.disabled = true;
+    button.textContent = "Refreshing…";
+    if (!automatic) setQueueSyncStatus("Refreshing queue…");
+    await chrome.action.setBadgeText({ text: "" });
+    state.queue = await api.fetchQueue();
+    showIdleQueue(state.queue);
+    setQueueSyncStatus(`Updated ${new Date().toLocaleTimeString()}`);
+    await scheduleQueuePolling();
+  } catch (error) {
+    setQueueSyncStatus(error instanceof Error ? error.message : "Could not refresh queue.", true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Refresh queue";
+  }
 }
 
 function stopTimers() {
@@ -225,6 +267,7 @@ function statusEntry(row, log, isCurrent) {
 }
 
 function renderRun(engine) {
+  clearQueuePolling();
   const { batchQueue = [], batchIndex = 0, batchLogs = [], batchDelay } = engine;
   const total = batchQueue.length;
   const doneCount = Math.min(batchIndex, total);
@@ -342,7 +385,7 @@ async function renderHistory() {
 
     const sub = document.createElement("span");
     const day = new Date(entry.at);
-    sub.textContent = `${day.toLocaleDateString()} ${day.toLocaleTimeString()}${entry.reason ? ` · ${entry.reason}` : ""}`;
+    sub.textContent = `${day.toLocaleDateString()} ${day.toLocaleTimeString()} · ${messageTypeLabel(entry.messageType)}${entry.reason ? ` · ${entry.reason}` : ""}`;
 
     const status = document.createElement("span");
     status.className = `status ${entry.status === "sent" ? "ok" : "fail"}`;
@@ -375,6 +418,7 @@ $("settings-button").addEventListener("click", async () => {
   $("settings-api-key").value = settings.coldDmApiKey;
   $("settings-base-url").value = settings.coldDmBaseUrl;
   $("delay-input").value = settings.sendDelaySeconds;
+  $("queue-polling-hours-input").value = String(settings.queuePollingHours);
   $("settings-status").hidden = true;
   $("raw-logs").hidden = true;
   showView("settings");
@@ -386,6 +430,7 @@ $("settings-save-button").addEventListener("click", async () => {
   const key = $("settings-api-key").value.trim();
   const baseUrl = $("settings-base-url").value.trim();
   const delay = Math.min(3600, Math.max(60, parseInt($("delay-input").value, 10) || DEFAULT_DELAY_SECONDS));
+  const queuePollingHours = [1, 3, 6, 12, 24].includes(Number($("queue-polling-hours-input").value)) ? Number($("queue-polling-hours-input").value) : DEFAULT_QUEUE_POLLING_HOURS;
   const result = await connect(key);
 
   if (!result.ok) {
@@ -394,7 +439,8 @@ $("settings-save-button").addEventListener("click", async () => {
     return;
   }
 
-  await chrome.storage.local.set({ sendDelaySeconds: delay, coldDmBaseUrl: baseUrl });
+  await chrome.storage.local.set({ sendDelaySeconds: delay, coldDmBaseUrl: baseUrl, queuePollingHours });
+  await scheduleQueuePolling();
   $("settings-status").textContent = "Saved.";
   $("settings-status").hidden = false;
 });
@@ -410,6 +456,8 @@ $("tab-history-button").addEventListener("click", async () => {
   showTab("history");
   await renderHistory();
 });
+
+$("refresh-queue-button").addEventListener("click", () => refreshToday());
 
 $("start-button").addEventListener("click", async () => {
   if (!state.queue || state.queue.items.length === 0) return;
