@@ -50,7 +50,15 @@ export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, 
       const done = new Set((await getStoredResults()).filter((item) => (item.at ?? "").startsWith(today)).map((item) => item.handle));
       return { ...mockQueue, items: mockQueue.items.filter((item) => !done.has(item.handle)) };
     }
-    return request("/api/ext/v1/queue");
+    const response = await request("/api/ext/v1/queue");
+    const campaigns = Array.isArray(response.campaigns) ? response.campaigns : [];
+    return {
+      campaigns,
+      campaign: campaigns[0]?.campaign?.name ?? null,
+      items: campaigns.flatMap(({ campaign, items = [] }) =>
+        items.map((item) => ({ ...item, campaign }))
+      ),
+    };
   }
 
   async function claimQueue(items) {
@@ -65,7 +73,7 @@ export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, 
     if (mockMode) return { ok: true, added: fresh.length };
     if (fresh.length === 0) return { ok: true, added: 0 };
     try {
-      const response = await request("/api/ext/v1/results", { method: "POST", body: JSON.stringify(fresh) });
+      const response = await request("/api/ext/v1/results", { method: "POST", body: JSON.stringify({ results: fresh }) });
       await storage.set({ [RESULTS_KEY]: stored.filter((item) => !fresh.some((result) => result.actionId === item.actionId && result.at === item.at)) });
       return { ...response, added: fresh.length };
     } catch (error) {
