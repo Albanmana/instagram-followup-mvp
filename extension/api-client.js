@@ -8,7 +8,7 @@ const MAX_STORED_RESULTS = 1000;
 
 export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, now = () => new Date() }) {
   const mockMode = baseUrl === undefined;
-  const defaultBaseUrl = "http://localhost:3000";
+  const defaultBaseUrl = "https://cold-dm-app-phi.vercel.app";
 
   function getMockQueue(platform) {
     const rawItem = {

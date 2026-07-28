@@ -25,6 +25,21 @@ test("verifyApiKey accepts cdm_ keys and rejects others", async () => {
   assert.equal((await api.verifyApiKey("")).ok, false);
 });
 
+test("verifyApiKey uses the production Cold DM App URL by default", async () => {
+  let requestedUrl;
+  const api = createApiClient({
+    storage: memoryStorage(),
+    baseUrl: "",
+    fetchFn: async (url) => {
+      requestedUrl = url;
+      return new Response(JSON.stringify({ workspace_name: "Cold DM" }), { status: 200 });
+    },
+  });
+
+  await api.verifyApiKey("cdm_live_test");
+  assert.equal(requestedUrl, "https://cold-dm-app-phi.vercel.app/api/ext/v1/me");
+});
+
 test("fetchQueue returns campaign and items", async () => {
   const api = createApiClient({ storage: memoryStorage(), now: NOW });
   const queue = await api.fetchQueue("instagram");
