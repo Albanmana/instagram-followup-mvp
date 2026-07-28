@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createPlatformAdapters, getPlatformAdapter } from "../extension/platform-adapters.js";
+import { validateBatchRows } from "../extension/batch-validation.js";
 
 const linkedInItem = {
   platform: "linkedin",
@@ -35,4 +36,12 @@ test("Instagram delegates only valid Instagram destinations", async () => {
   assert.equal(adapter.validateItem(item), null);
   await adapter.send(item);
   assert.equal(called, true);
+});
+
+test("rejects a mixed-platform batch", () => {
+  assert.equal(validateBatchRows([{ platform: "instagram" }, { platform: "linkedin" }]), "A sender run must use one platform.");
+});
+
+test("accepts a single-platform batch", () => {
+  assert.equal(validateBatchRows([{ platform: "instagram" }, { platform: "instagram" }]), null);
 });

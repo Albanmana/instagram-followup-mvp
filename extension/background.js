@@ -1,12 +1,19 @@
+import { createPlatformAdapters, getPlatformAdapter } from "./platform-adapters.js";
+import { validateBatchRows } from "./batch-validation.js";
+
 // ── Defaults (from .env) ─────────────────────────────────────
-const DEFAULT_CRM_UPDATE_URL = "https://n8n.srv765660.hstgr.cloud/webhook/8472dc92-a513-4739-bc7a-0261e2e71b00";
-const DEFAULT_AUTO_FETCH_URL = "https://n8n.srv765660.hstgr.cloud/webhook/ada824b2-daf0-4209-b302-38cbcce1e57e";
-const DEFAULT_MARK_DONE_URL  = "https://n8n.srv765660.hstgr.cloud/webhook/405003b5-07bb-47bf-a087-15714542fd31";
-const DEFAULT_BATCH_DELAY    = 400;
-const DEFAULT_N8N_API_KEY    = "ExPA5$sG5ngS9h?G";
+const DEFAULT_BATCH_DELAY = 400;
 const SCRAPE_POST_TIMEOUT_MS = 30000;
 const SCRAPE_PROFILE_TIMEOUT_MS = 12000;
 const SCRAPE_LOG_LIMIT = 300;
+
+const adapters = createPlatformAdapters({
+  sendInstagramMessage,
+  getInstagramSession: async () => Boolean(await chrome.cookies.get({
+    url: "https://www.instagram.com",
+    name: "sessionid",
+  })),
+});
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "GET_RUN_LOGS") {
@@ -21,14 +28,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
 
-  sendTestMessage(message.payload)
+  sendInstagramMessage(message.payload)
     .then((result) => sendResponse({ ok: true, result }))
     .catch((error) => sendResponse({ ok: false, error: error.message }));
 
   return true;
 });
 
-async function sendTestMessage({ handle, message, has_gif, gif_query }) {
+async function sendInstagramMessage({ recipient, handle = recipient?.handle, message, has_gif, gif_query }) {
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let openedTabId = null;
   await clearRunLogs();
@@ -1283,7 +1290,7 @@ async function setBatchStatus(status) {
 
 async function scheduleBatchAlarm() {
   const { batchDelay = DEFAULT_BATCH_DELAY } = await chrome.storage.local.get("batchDelay");
-  chrome.alarms.create("IG_BATCH_NEXT", { delayInMinutes: batchDelay / 60 });
+  chrome.alarms.create("COLD_DM_BATCH_NEXT", { delayInMinutes: batchDelay / 60 });
 }
 
 async function processBatchItem(index) {
@@ -1296,19 +1303,32 @@ async function processBatchItem(index) {
   }
 
   const row = batchQueue[index];
-  const { handle, message, has_gif, gif_query } = row;
+  const adapter = getPlatformAdapter(adapters, row.platform);
+  const batchLogFields = {
+    platform: row.platform,
+    recipient: row.recipient,
+    actionId: row.actionId,
+    messageId: row.messageId,
+    leadId: row.leadId,
+    messageType: row.messageType,
+    handle: row.recipient?.handle ?? row.handle,
+  };
 
   try {
-    await sendTestMessage({ handle, message, has_gif, gif_query });
-    await appendBatchLog({ actionId: row.actionId, messageId: row.messageId, leadId: row.leadId, messageType: row.messageType, handle, status: "sent", at: new Date().toISOString() });
-    await callMarkDone(row);
+    if (!adapter) throw new Error("Unsupported platform.");
+    const validationError = adapter.validateItem(row);
+    if (validationError) throw new Error(validationError);
+    const result = await adapter.send(row);
+    const status = result?.status === "skipped" ? "skipped" : "sent";
+    await appendBatchLog({
+      ...batchLogFields,
+      status,
+      ...(status === "skipped" && result?.reason ? { reason: result.reason } : {}),
+      at: result?.at ?? new Date().toISOString(),
+    });
   } catch (error) {
     await appendBatchLog({
-      actionId: row.actionId,
-      messageId: row.messageId,
-      leadId: row.leadId,
-      messageType: row.messageType,
-      handle,
+      ...batchLogFields,
       status: "error",
       error: error.message,
       at: new Date().toISOString()
@@ -1326,123 +1346,11 @@ async function processBatchItem(index) {
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name === "IG_BATCH_NEXT") {
+  if (alarm.name === "COLD_DM_BATCH_NEXT") {
     const { batchIndex } = await getBatchState();
     await processBatchItem(batchIndex);
-    return;
-  }
-  if (alarm.name === "IG_AUTO_FETCH") {
-    try {
-      await runAutoFetch();
-    } catch (error) {
-      await appendRunLog("auto-fetch", `Error: ${error.message}`);
-      console.error(`[IG Follow-Up] Auto-fetch failed: ${error.message}`);
-    }
-    return;
-  }
-  if (alarm.name === "IG_CRM_SYNC") {
-    try {
-      await runCrmSync();
-    } catch (error) {
-      await appendCrmLog(`Error: ${error.message}`);
-    }
   }
 });
-
-// Re-register alarms after Chrome restarts (alarms persist but being explicit is safer)
-chrome.runtime.onStartup.addListener(async () => {
-  const {
-    autoFetchEnabled,
-    autoFetchIntervalHours = 3,
-    crmSyncEnabled,
-    crmSyncIntervalHours = 6,
-  } = await chrome.storage.local.get([
-    "autoFetchEnabled", "autoFetchIntervalHours",
-    "crmSyncEnabled", "crmSyncIntervalHours",
-  ]);
-
-  if (autoFetchEnabled) {
-    const existing = await new Promise((resolve) => chrome.alarms.get("IG_AUTO_FETCH", resolve));
-    if (!existing) {
-      chrome.alarms.create("IG_AUTO_FETCH", { periodInMinutes: autoFetchIntervalHours * 60 });
-    }
-  }
-
-  if (crmSyncEnabled) {
-    const existing = await new Promise((resolve) => chrome.alarms.get("IG_CRM_SYNC", resolve));
-    if (!existing) {
-      chrome.alarms.create("IG_CRM_SYNC", { periodInMinutes: crmSyncIntervalHours * 60 });
-    }
-  }
-});
-
-// ── Crypto helpers ────────────────────────────────────────────
-function bufToBase64(buf) {
-  return btoa(String.fromCharCode(...new Uint8Array(buf)));
-}
-
-function base64ToBuf(b64) {
-  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-}
-
-async function getDecryptedApiKey() {
-  const { apiKeyEncrypted, apiKeyIv, apiKeyCryptoKey } =
-    await chrome.storage.local.get(["apiKeyEncrypted", "apiKeyIv", "apiKeyCryptoKey"]);
-  if (!apiKeyEncrypted || !apiKeyIv || !apiKeyCryptoKey) return DEFAULT_N8N_API_KEY;
-  try {
-    const cryptoKey = await crypto.subtle.importKey(
-      "raw",
-      base64ToBuf(apiKeyCryptoKey),
-      { name: "AES-GCM" },
-      false,
-      ["decrypt"]
-    );
-    const decrypted = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: base64ToBuf(apiKeyIv) },
-      cryptoKey,
-      base64ToBuf(apiKeyEncrypted)
-    );
-    return new TextDecoder().decode(decrypted);
-  } catch {
-    return null;
-  }
-}
-
-// ── CSV parser (background copy) ─────────────────────────────
-function parseLine(line) {
-  const cells = [];
-  let current = "";
-  let inQuotes = false;
-  for (const ch of line) {
-    if (ch === '"') { inQuotes = !inQuotes; }
-    else if (ch === "," && !inQuotes) { cells.push(current.trim()); current = ""; }
-    else { current += ch; }
-  }
-  cells.push(current.trim());
-  return cells;
-}
-
-function parseCSVText(text) {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim() !== "");
-  if (lines.length < 2) return [];
-
-  const headers = parseLine(lines[0]).map((h) => h.toLowerCase().trim());
-  const handleIdx = headers.indexOf("handle");
-  const messageIdx = headers.indexOf("message");
-  if (handleIdx === -1 || messageIdx === -1) return [];
-
-  return lines.slice(1).reduce((acc, line) => {
-    const cells = parseLine(line);
-    const handle = (cells[handleIdx] ?? "").replace(/^@+/, "").trim();
-    const message = (cells[messageIdx] ?? "").trim();
-    if (!handle || !message) return acc;
-    const row = {};
-    headers.forEach((h, i) => { row[h] = (cells[i] ?? "").trim(); });
-    row.handle = handle;
-    acc.push(row);
-    return acc;
-  }, []);
-}
 
 function formatTimestamp(value) {
   if (value == null || value === "") return "";
@@ -2687,199 +2595,6 @@ async function runScrapeJob(payload) {
   }
 }
 
-// ── Auto-fetch ────────────────────────────────────────────────
-async function runAutoFetch(forceRun = false) {
-  const { autoFetchUrl = DEFAULT_AUTO_FETCH_URL, autoFetchEnabled } =
-    await chrome.storage.local.get(["autoFetchUrl", "autoFetchEnabled"]);
-  if (!autoFetchUrl) throw new Error("No URL configured in Settings.");
-  if (!forceRun && !autoFetchEnabled) return;
-
-  await appendRunLog("auto-fetch", `Fetching from ${autoFetchUrl}…`);
-
-  const headers = { Accept: "text/csv,text/plain,*/*" };
-  const apiKey = await getDecryptedApiKey();
-  if (apiKey) headers["x-api-key"] = apiKey;
-
-  const response = await fetch(autoFetchUrl, { headers });
-  if (!response.ok) {
-    await appendRunLog("auto-fetch", `HTTP error ${response.status} — fetch aborted.`);
-    throw new Error(`Endpoint returned ${response.status}`);
-  }
-
-  const rows = parseCSVText(await response.text());
-  await appendRunLog("auto-fetch", `Response received — ${rows.length} valid row(s).`);
-
-  if (rows.length === 0) {
-    await appendRunLog("auto-fetch", "No valid rows — batch not started.");
-    return;
-  }
-
-  const { batchDelay = DEFAULT_BATCH_DELAY } = await chrome.storage.local.get("batchDelay");
-  await chrome.alarms.clear("IG_BATCH_NEXT");
-  await chrome.storage.local.set({
-    batchQueue: rows,
-    batchIndex: 0,
-    batchStatus: "running",
-    batchLogs: [],
-    batchDelay,
-  });
-  await appendRunLog("auto-fetch", `Batch started — ${rows.length} message(s) queued (delay: ${batchDelay}s).`);
-  await processBatchItem(0);
-}
-
-// ── CRM Sync ──────────────────────────────────────────────────
-
-let crmSyncPendingTabId = null;
-let crmSyncPendingTimeout = null;
-
-async function runCrmSync(forceRun = false) {
-  const { crmSyncEnabled, crmWebhookUrl = DEFAULT_CRM_UPDATE_URL } =
-    await chrome.storage.local.get(["crmSyncEnabled", "crmWebhookUrl"]);
-  if (!crmWebhookUrl) throw new Error("No CRM webhook URL configured in Settings.");
-  if (!forceRun && !crmSyncEnabled) return;
-
-  await appendCrmLog("Starting CRM sync — opening Instagram DMs…");
-  await chrome.storage.local.set({ crmSyncRequestedAt: Date.now() });
-
-  // crm-hook.js (MAIN world content script) is always pre-installed via manifest
-  // so no executeScript needed here — just open the tab and wait for postMessage
-  const tab = await chrome.tabs.create({ url: "https://www.instagram.com/direct/", active: true });
-  crmSyncPendingTabId = tab.id;
-  await appendCrmLog(`[debug] Tab created: id=${tab.id} status=${tab.status}`);
-
-  if (crmSyncPendingTimeout) clearTimeout(crmSyncPendingTimeout);
-  crmSyncPendingTimeout = setTimeout(async () => {
-    if (crmSyncPendingTabId != null) {
-      chrome.tabs.remove(crmSyncPendingTabId).catch(() => {});
-      crmSyncPendingTabId = null;
-    }
-    await chrome.storage.local.set({ crmSyncRequestedAt: 0 });
-    await appendCrmLog("Timeout — no data received from Instagram within 30s.");
-  }, 30000);
-}
-
-async function processCrmData(rawData) {
-  const edges = rawData?.data
-    ?.get_slide_mailbox_for_iris_subscription
-    ?.threads_by_system_folder_and_ig_inbox_folder
-    ?.edges;
-
-  if (!Array.isArray(edges)) throw new Error("Unexpected Instagram response structure.");
-
-  await appendCrmLog(`Received ${edges.length} thread(s) from Instagram.`);
-
-  const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
-  const myFbid = edges[0]?.node?.as_ig_direct_thread?.viewer?.interop_messaging_user_fbid ?? null;
-
-  let skippedUnread = 0;
-  let skippedOld = 0;
-  const results = [];
-
-  for (const edge of edges) {
-    const thread = edge?.node?.as_ig_direct_thread;
-    if (!thread) continue;
-
-    if (thread.marked_as_unread) { skippedUnread++; continue; }
-
-    const lastActivity = parseInt(thread.last_activity_timestamp_ms, 10);
-    if (lastActivity < thirtyDaysAgo) { skippedOld++; continue; }
-
-    const username = thread.users?.[0]?.username;
-    if (!username) continue;
-
-    const lastMsgNode = thread.slide_messages?.edges?.[0]?.node;
-    const sentByMe = myFbid != null && lastMsgNode?.sender_fbid === myFbid;
-
-    results.push({
-      handle: username,
-      thread_key: thread.thread_key,
-      last_activity_ms: lastActivity,
-      last_message_sent_by_me: sentByMe,
-      last_message_preview: lastMsgNode?.igd_snippet ?? "",
-      last_message_text: lastMsgNode?.text_body ?? "",
-      last_message_timestamp_ms: lastMsgNode?.timestamp_ms
-        ? parseInt(lastMsgNode.timestamp_ms, 10)
-        : null,
-    });
-  }
-
-  await appendCrmLog(
-    `Filtered: ${results.length} thread(s) to sync (skipped ${skippedUnread} unread, ${skippedOld} too old).`
-  );
-
-  if (results.length === 0) {
-    await appendCrmLog("Nothing to send to CRM.");
-    return;
-  }
-
-  const { crmWebhookUrl = DEFAULT_CRM_UPDATE_URL } = await chrome.storage.local.get("crmWebhookUrl");
-  const crmApiKey = await getDecryptedCrmApiKey();
-  const headers = { "Content-Type": "application/json" };
-  if (crmApiKey) headers["x-api-key"] = crmApiKey;
-
-  const response = await fetch(crmWebhookUrl, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ threads: results, synced_at: new Date().toISOString() }),
-  });
-
-  if (!response.ok) throw new Error(`CRM webhook returned ${response.status}`);
-
-  await appendCrmLog(`Sent ${results.length} thread(s) to CRM. Status: ${response.status}.`);
-  await chrome.storage.local.set({
-    crmLastSync: new Date().toISOString(),
-    crmLastSyncCount: results.length,
-  });
-}
-
-async function appendCrmLog(message) {
-  const { crmLogs = [] } = await chrome.storage.local.get("crmLogs");
-  const next = [...crmLogs, { at: new Date().toISOString(), message }].slice(-100);
-  await chrome.storage.local.set({ crmLogs: next });
-  console.log(`[IG Follow-Up][crm] ${message}`);
-}
-
-async function getCrmLogs() {
-  const { crmLogs = [] } = await chrome.storage.local.get("crmLogs");
-  return crmLogs;
-}
-
-async function getDecryptedCrmApiKey() {
-  const { crmApiKeyEncrypted, crmApiKeyIv, crmApiKeyCryptoKey } =
-    await chrome.storage.local.get(["crmApiKeyEncrypted", "crmApiKeyIv", "crmApiKeyCryptoKey"]);
-  if (!crmApiKeyEncrypted || !crmApiKeyIv || !crmApiKeyCryptoKey) return DEFAULT_N8N_API_KEY;
-  try {
-    const cryptoKey = await crypto.subtle.importKey(
-      "raw", base64ToBuf(crmApiKeyCryptoKey), { name: "AES-GCM" }, false, ["decrypt"]
-    );
-    const decrypted = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: base64ToBuf(crmApiKeyIv) },
-      cryptoKey,
-      base64ToBuf(crmApiKeyEncrypted)
-    );
-    return new TextDecoder().decode(decrypted);
-  } catch {
-    return null;
-  }
-}
-
-async function callMarkDone(row) {
-  const { markDoneUrl = DEFAULT_MARK_DONE_URL } = await chrome.storage.local.get("markDoneUrl");
-  if (!markDoneUrl) return;
-  const apiKey = await getDecryptedApiKey();
-  const headers = { "Content-Type": "application/json" };
-  if (apiKey) headers["x-api-key"] = apiKey;
-  try {
-    await fetch(markDoneUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ ...row, sent_at: new Date().toISOString() }),
-    });
-  } catch (e) {
-    await appendRunLog("mark-done", `Error: ${e.message}`);
-  }
-}
-
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "SCRAPE_NETWORK_DATA") {
     (async () => {
@@ -3008,62 +2723,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "CRM_INBOX_DATA") {
-    (async () => {
-      try {
-        const { crmSyncRequestedAt = 0 } = await chrome.storage.local.get("crmSyncRequestedAt");
-        if (Date.now() - crmSyncRequestedAt > 60000) {
-          sendResponse({ ok: false, error: "No CRM sync pending." });
-          return;
-        }
-        await chrome.storage.local.set({ crmSyncRequestedAt: 0 });
-        if (crmSyncPendingTimeout != null) {
-          clearTimeout(crmSyncPendingTimeout);
-          crmSyncPendingTimeout = null;
-        }
-        await processCrmData(message.data);
-        if (crmSyncPendingTabId != null) {
-          chrome.tabs.remove(crmSyncPendingTabId).catch(() => {});
-          crmSyncPendingTabId = null;
-        }
-        sendResponse({ ok: true });
-      } catch (error) {
-        await appendCrmLog(`Processing error: ${error.message}`);
-        sendResponse({ ok: false, error: error.message });
-      }
-    })();
+  if (message?.type === "GET_PLATFORM_CAPABILITY") {
+    const adapter = getPlatformAdapter(adapters, message.platform);
+    if (!adapter) {
+      sendResponse({ ok: false, error: "Unsupported platform." });
+      return false;
+    }
+    const capability = adapter.canExecute();
+    adapter.isLoggedIn().then((loggedIn) => sendResponse({
+      ok: true,
+      platform: adapter.platform,
+      executable: capability.ok,
+      reason: capability.reason,
+      loggedIn,
+      loginMessage: adapter.getLoginMessage(),
+    }));
     return true;
   }
 
-  if (message?.type === "TRIGGER_CRM_SYNC") {
-    (async () => {
-      try {
-        await runCrmSync(true);
-        sendResponse({ ok: true });
-      } catch (error) {
-        sendResponse({ ok: false, error: error.message });
-      }
-    })();
-    return true;
-  }
-
-  if (message?.type === "GET_CRM_LOGS") {
-    getCrmLogs()
-      .then((logs) => sendResponse({ ok: true, logs }))
-      .catch((error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-
-  return false;
-});
-
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "START_BATCH") {
     (async () => {
       try {
         const rows = message.payload?.rows ?? [];
+        const batchValidationError = validateBatchRows(rows);
+        if (batchValidationError) throw new Error(batchValidationError);
+        const adapter = getPlatformAdapter(adapters, rows[0].platform);
+        if (!adapter) throw new Error("Unsupported platform.");
+        const itemValidationError = rows
+          .map((row) => adapter.validateItem(row))
+          .find(Boolean);
+        if (itemValidationError) throw new Error(itemValidationError);
+        const capability = adapter.canExecute();
+        if (!capability.ok) throw new Error(capability.reason ?? "Platform sending is unavailable.");
+
         const delaySeconds = message.payload?.delaySeconds ?? 400;
-        await chrome.alarms.clear("IG_BATCH_NEXT");
+        await chrome.alarms.clear("COLD_DM_BATCH_NEXT");
         await chrome.storage.local.set({
           batchQueue: rows,
           batchIndex: 0,
@@ -3083,7 +2777,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "STOP_BATCH") {
     (async () => {
       try {
-        await chrome.alarms.clear("IG_BATCH_NEXT");
+        await chrome.alarms.clear("COLD_DM_BATCH_NEXT");
         await setBatchStatus("stopped");
         sendResponse({ ok: true });
       } catch (error) {
@@ -3097,18 +2791,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     getBatchState()
       .then((state) => sendResponse({ ok: true, ...state }))
       .catch((error) => sendResponse({ ok: false, error: error.message }));
-    return true;
-  }
-
-  if (message?.type === "TRIGGER_AUTO_FETCH") {
-    (async () => {
-      try {
-        await runAutoFetch(true);
-        sendResponse({ ok: true });
-      } catch (error) {
-        sendResponse({ ok: false, error: error.message });
-      }
-    })();
     return true;
   }
 
