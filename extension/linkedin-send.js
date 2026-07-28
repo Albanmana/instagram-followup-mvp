@@ -1,8 +1,9 @@
 export function isLinkedInProfileUrl(value) {
   try {
     const url = new URL(value);
-    return url.hostname.replace(/^www\./, "") === "linkedin.com"
-      && /^\/in\/[^/]+\/?$/.test(url.pathname);
+    return url.protocol === "https:"
+      && url.hostname.replace(/^www\./, "") === "linkedin.com"
+      && /^\/in\/[^/]+\/?$/.test(decodeURIComponent(url.pathname));
   } catch {
     return false;
   }
@@ -11,7 +12,10 @@ export function isLinkedInProfileUrl(value) {
 export function isLinkedInComposeHref(value) {
   try {
     const url = new URL(value, "https://www.linkedin.com");
-    return url.pathname === "/messaging/compose/" && Boolean(url.searchParams.get("recipient"));
+    return url.protocol === "https:"
+      && url.hostname.replace(/^www\./, "") === "linkedin.com"
+      && url.pathname === "/messaging/compose/"
+      && Boolean(url.searchParams.get("recipient"));
   } catch {
     return false;
   }
@@ -28,4 +32,8 @@ export function validateLinkedInTestPayload(payload) {
   if (!isLinkedInProfileUrl(profileUrl)) throw new Error("A canonical LinkedIn profile URL is required.");
   if (!message) throw new Error("A LinkedIn test message is required.");
   return { profileUrl, message };
+}
+
+export function classifyLinkedInUnavailable(reason) {
+  return { status: "skipped", reason, at: new Date().toISOString() };
 }
