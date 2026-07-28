@@ -22,20 +22,47 @@ test("LinkedIn is recognized but cannot execute in phase 1", async () => {
   assert.deepEqual(adapter.canExecute(), { ok: false, reason: "LinkedIn sending is being prepared." });
 });
 
-test("Instagram delegates only valid Instagram destinations", async () => {
-  let called = false;
+test("Instagram sends only when the canonical profile URL and handle identify the same recipient", async () => {
+  const sentItems = [];
   const adapters = createPlatformAdapters({
-    sendInstagramMessage: async () => {
-      called = true;
+    sendInstagramMessage: async (item) => {
+      sentItems.push(item);
       return { status: "sent", at: "2026-07-28T10:00:00.000Z" };
     },
     getInstagramSession: async () => true,
   });
   const adapter = getPlatformAdapter(adapters, "instagram");
-  const item = { platform: "instagram", recipient: { profileUrl: "https://www.instagram.com/alice/" } };
+  const item = {
+    platform: "instagram",
+    handle: "stale-top-level-handle",
+    recipient: {
+      profileUrl: "https://www.instagram.com/alice/",
+      handle: "alice",
+    },
+  };
   assert.equal(adapter.validateItem(item), null);
   await adapter.send(item);
-  assert.equal(called, true);
+  assert.equal(sentItems.length, 1);
+  assert.equal(sentItems[0].handle, "alice");
+  assert.equal(sentItems[0].recipient.handle, "alice");
+
+  assert.equal(
+    adapter.validateItem({
+      platform: "instagram",
+      recipient: {
+        profileUrl: "https://www.instagram.com/alice/",
+        handle: "bob",
+      },
+    }),
+    "Instagram profile URL and handle must match.",
+  );
+  assert.equal(
+    adapter.validateItem({
+      platform: "instagram",
+      recipient: { profileUrl: "https://www.instagram.com/alice/" },
+    }),
+    "Instagram profile URL and handle must match.",
+  );
 });
 
 test("rejects a mixed-platform batch", () => {

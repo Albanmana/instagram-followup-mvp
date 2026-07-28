@@ -33,6 +33,20 @@ export function normalizeQueueItem(raw, campaign = null) {
   };
 }
 
+export function normalizePersistedQueueItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => {
+    if (item?.platform != null || item?.recipient != null) return item;
+    const normalized = normalizeQueueItem(item, item?.campaign ?? null);
+    if (!normalized) return item;
+    return {
+      ...item,
+      platform: normalized.platform,
+      recipient: normalized.recipient,
+    };
+  });
+}
+
 export function recipientLabel(item) {
   if (item.platform === "linkedin") return item.recipient.displayName || item.recipient.handle || item.recipient.profileUrl;
   return item.recipient.handle ? `@${item.recipient.handle.replace(/^@+/, "")}` : item.recipient.displayName || item.recipient.profileUrl;

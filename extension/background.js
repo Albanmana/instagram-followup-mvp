@@ -1,5 +1,6 @@
 import { createPlatformAdapters, getPlatformAdapter } from "./platform-adapters.js";
 import { validateBatchRows } from "./batch-validation.js";
+import { normalizePersistedQueueItems } from "./platforms.js";
 
 // ── Defaults (from .env) ─────────────────────────────────────
 const DEFAULT_BATCH_DELAY = 400;
@@ -1260,12 +1261,13 @@ function ensureScrapeNotStopped() {
 
 async function getBatchState() {
   const {
-    batchQueue = [],
+    batchQueue: storedBatchQueue = [],
     batchIndex = 0,
     batchStatus = null,
     batchLogs = [],
     batchDelay = 400
   } = await chrome.storage.local.get(["batchQueue", "batchIndex", "batchStatus", "batchLogs", "batchDelay"]);
+  const batchQueue = normalizePersistedQueueItems(storedBatchQueue);
   return { batchQueue, batchIndex, batchStatus, batchLogs, batchDelay };
 }
 

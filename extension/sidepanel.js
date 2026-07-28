@@ -1,5 +1,10 @@
 import { createApiClient, chromeStorageAdapter } from "./api-client.js";
-import { isPlatform, platformLabel, recipientLabel } from "./platforms.js";
+import {
+  isPlatform,
+  normalizePersistedQueueItems,
+  platformLabel,
+  recipientLabel,
+} from "./platforms.js";
 
 const api = createApiClient({ storage: chromeStorageAdapter, baseUrl: "" });
 const $ = (id) => document.getElementById(id);
@@ -18,6 +23,7 @@ let pollTimer = null;
 let countdownTimer = null;
 let queuePollTimer = null;
 let lastSeenIndex = -1;
+let queueGeneration = 0;
 
 function showView(name) {
   $("view-connect").hidden = name !== "connect";
@@ -176,6 +182,7 @@ function renderList(entries) {
 }
 
 function clearDisplayedQueue() {
+  queueGeneration += 1;
   state.queue = null;
   $("queue-card").hidden = true;
   $("empty-card").hidden = true;
@@ -205,27 +212,42 @@ function applyCapability(capability, hasQueuedRows) {
 
 async function startRun(items) {
   const platform = selectedPlatform();
+  const startQueueGeneration = queueGeneration;
+  const keepSelectorLocked = Array.isArray(state.pausedItems) && state.pausedItems.length > 0;
+  setPlatformControlsDisabled(true);
   const capability = await getPlatformCapability(platform);
+  if (platform !== selectedPlatform()) {
+    if (!keepSelectorLocked) setPlatformControlsDisabled(false);
+    return false;
+  }
   if (!capability?.ok || capability.platform !== platform) {
     setHeaderStatus(capability?.error ?? "Could not check platform availability", "");
+    if (!keepSelectorLocked) setPlatformControlsDisabled(false);
     return false;
   }
   applyCapability(capability, items.length > 0);
-  if (!capability.executable) return false;
+  if (!capability.executable) {
+    if (!keepSelectorLocked) setPlatformControlsDisabled(false);
+    return false;
+  }
   if (!capability.loggedIn) {
     $("login-banner").textContent = capability.loginMessage ?? `Log in to ${platformLabel(platform)} in this browser, then resume.`;
     $("login-banner").hidden = false;
+    if (!keepSelectorLocked) setPlatformControlsDisabled(false);
     return false;
   }
 
   $("login-banner").hidden = true;
-  setPlatformControlsDisabled(true);
   clearQueuePolling();
   const { sendDelaySeconds } = await getSettings();
+  if (platform !== selectedPlatform() || startQueueGeneration !== queueGeneration) {
+    if (!keepSelectorLocked) setPlatformControlsDisabled(false);
+    return false;
+  }
   const claimed = await api.claimQueue(items, platform);
   if (!claimed?.claimed?.length) {
     setHeaderStatus("Queue claim failed — refresh and try again", "");
-    setPlatformControlsDisabled(false);
+    if (!keepSelectorLocked) setPlatformControlsDisabled(false);
     return false;
   }
   const claimedIds = new Set(claimed.claimed);
@@ -288,19 +310,21 @@ function showIdleQueue(queue, capability) {
 async function showRunningEngine(engine) {
   if (!engine?.ok || engine.batchStatus !== "running") return false;
   clearQueuePolling();
-  const runningPlatform = engine.batchQueue?.[0]?.platform;
+  const batchQueue = normalizePersistedQueueItems(engine.batchQueue);
+  const runningPlatform = batchQueue[0]?.platform;
   await applySelectedPlatform(runningPlatform);
   state.capability = await getPlatformCapability(selectedPlatform());
   setPlatformControlsDisabled(true);
-  renderRun(engine);
+  renderRun({ ...engine, batchQueue });
   return true;
 }
 
 async function showPausedItems(pausedItems) {
-  if (!Array.isArray(pausedItems) || pausedItems.length === 0) return false;
+  const normalizedItems = normalizePersistedQueueItems(pausedItems);
+  if (normalizedItems.length === 0) return false;
   clearQueuePolling();
-  state.pausedItems = pausedItems;
-  await applySelectedPlatform(pausedItems[0]?.platform);
+  state.pausedItems = normalizedItems;
+  await applySelectedPlatform(normalizedItems[0]?.platform);
   state.capability = await getPlatformCapability(selectedPlatform());
   setPlatformControlsDisabled(true);
   $("queue-card").hidden = true;
@@ -308,20 +332,24 @@ async function showPausedItems(pausedItems) {
   $("run-card").hidden = false;
   $("pause-button").hidden = true;
   $("resume-button").hidden = false;
-  $("run-next").textContent = `Paused — ${pausedItems.length} message(s) remaining.`;
+  $("run-next").textContent = `Paused — ${normalizedItems.length} message(s) remaining.`;
   setHeaderStatus("● Paused", "run");
   $("list-title").textContent = "Run";
-  renderList(pausedItems.map((item) => ({ item, sub: "-", status: "Pending", statusClass: "wait" })));
+  renderList(normalizedItems.map((item) => ({ item, sub: "-", status: "Pending", statusClass: "wait" })));
   return true;
 }
 
-async function refreshToday({ automatic = false } = {}) {
+async function reconcileActiveOrPausedRun() {
   const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
-  if (await showRunningEngine(engine)) return;
-
+  if (await showRunningEngine(engine)) return true;
   const { pausedItems } = await chrome.storage.local.get("pausedItems");
-  if (await showPausedItems(pausedItems)) return;
+  return showPausedItems(pausedItems);
+}
 
+async function refreshToday({ automatic = false } = {}) {
+  if (await reconcileActiveOrPausedRun()) return;
+
+  const refreshGeneration = ++queueGeneration;
   const button = $("refresh-queue-button");
   const platform = selectedPlatform();
   try {
@@ -332,16 +360,17 @@ async function refreshToday({ automatic = false } = {}) {
     const queue = await api.fetchQueue(platform);
     const capability = await getPlatformCapability(platform);
     if (!capability?.ok) throw new Error(capability?.error ?? "Could not check platform availability");
-    if (platform !== selectedPlatform()) return;
-    const latestEngine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
-    if (await showRunningEngine(latestEngine)) return;
-    const { pausedItems: latestPausedItems } = await chrome.storage.local.get("pausedItems");
-    if (await showPausedItems(latestPausedItems)) return;
+    if (platform !== selectedPlatform() || refreshGeneration !== queueGeneration) return;
+    if (await reconcileActiveOrPausedRun()) return;
+    if (platform !== selectedPlatform() || refreshGeneration !== queueGeneration) return;
     state.queue = queue;
     showIdleQueue(state.queue, capability);
     setQueueSyncStatus(`Updated ${new Date().toLocaleTimeString()}`);
     await scheduleQueuePolling();
   } catch (error) {
+    if (platform !== selectedPlatform() || refreshGeneration !== queueGeneration) return;
+    if (await reconcileActiveOrPausedRun()) return;
+    if (platform !== selectedPlatform() || refreshGeneration !== queueGeneration) return;
     setPlatformControlsDisabled(false);
     setQueueSyncStatus(error instanceof Error ? error.message : "Could not refresh queue.", true);
   } finally {

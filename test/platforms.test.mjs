@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  normalizePersistedQueueItems,
   normalizeQueueItem,
   platformLabel,
   recipientLabel,
@@ -62,4 +63,44 @@ test("rejects a legacy row whose handle is not a non-empty string", () => {
     handle: 123, message: "Hello", messageType: "first_dm",
   }, campaign);
   assert.equal(item, null);
+});
+
+test("upgrades only legacy persisted Instagram rows and preserves current queue rows", () => {
+  const legacy = {
+    actionId: "action-legacy",
+    messageId: "message-legacy",
+    leadId: "lead-legacy",
+    handle: "cold.dm",
+    message: "Hello",
+    messageType: "followup",
+    has_gif: true,
+  };
+  const current = {
+    actionId: "action-current",
+    messageId: "message-current",
+    leadId: "lead-current",
+    platform: "instagram",
+    recipient: {
+      displayName: "Alice",
+      profileUrl: "https://www.instagram.com/alice/",
+      handle: "alice",
+    },
+    handle: "alice",
+    message: "Hi",
+    messageType: "first_dm",
+    customRuntimeField: "keep-me",
+  };
+
+  const [migrated, untouched] = normalizePersistedQueueItems([legacy, current]);
+
+  assert.deepEqual(migrated, {
+    ...legacy,
+    platform: "instagram",
+    recipient: {
+      displayName: null,
+      profileUrl: "https://www.instagram.com/cold.dm/",
+      handle: "cold.dm",
+    },
+  });
+  assert.strictEqual(untouched, current);
 });

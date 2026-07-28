@@ -127,6 +127,8 @@ async function withPanel({
   const runtimeMessages = [];
   const requests = [];
   let currentBatchStatus = batchStatus;
+  let capabilityHandler = null;
+  let queueFetchHandler = queueFetch;
 
   globalThis.document = document;
   globalThis.setInterval = () => 1;
@@ -148,6 +150,7 @@ async function withPanel({
         runtimeMessages.push(message);
         if (message.type === "GET_BATCH_STATUS") return currentBatchStatus;
         if (message.type === "GET_PLATFORM_CAPABILITY") {
+          if (capabilityHandler) return capabilityHandler(message);
           const executable = message.platform === "instagram";
           return {
             ok: true,
@@ -181,7 +184,7 @@ async function withPanel({
     if (String(url).includes("/results")) {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }
-    if (queueFetch) return queueFetch(String(url), options);
+    if (queueFetchHandler) return queueFetchHandler(String(url), options);
     const platform = new URL(String(url)).searchParams.get("platform");
     return new Response(JSON.stringify(queueResponse(platform)), { status: 200 });
   };
@@ -198,6 +201,12 @@ async function withPanel({
       runtimeMessages,
       setBatchStatus(value) {
         currentBatchStatus = value;
+      },
+      setCapabilityHandler(handler) {
+        capabilityHandler = handler;
+      },
+      setQueueFetchHandler(handler) {
+        queueFetchHandler = handler;
       },
     });
   } finally {
@@ -304,6 +313,84 @@ test("a deferred queue refresh cannot overwrite a newly paused run", { concurren
   });
 });
 
+test("a failed deferred queue refresh reconciles a newly active run before changing controls", { concurrency: false }, async () => {
+  const pendingQueue = deferred();
+  const queueFetchStarted = deferred();
+  const row = {
+    actionId: "action-1",
+    messageId: "message-1",
+    leadId: "lead-1",
+    platform: "instagram",
+    recipient: {
+      displayName: "Alice",
+      handle: "alice",
+      profileUrl: "https://www.instagram.com/alice/",
+    },
+    message: "Hello",
+    messageType: "first_dm",
+  };
+
+  await withPanel({
+    queueFetch: () => {
+      queueFetchStarted.resolve();
+      return pendingQueue.promise;
+    },
+    async testBody({ document, setBatchStatus }) {
+      await queueFetchStarted.promise;
+      setBatchStatus({
+        ok: true,
+        batchStatus: "running",
+        batchQueue: [row],
+        batchIndex: 0,
+        batchLogs: [],
+        batchDelay: 400,
+      });
+      pendingQueue.resolve(new Response("upstream unavailable", { status: 503 }));
+      await settle();
+
+      assert.equal(document.getElementById("run-card").hidden, false);
+      assert.equal(document.getElementById("queue-card").hidden, true);
+      assert.equal(document.getElementById("platform-select").disabled, true);
+    },
+  });
+});
+
+test("a failed deferred queue refresh reconciles a newly paused run before changing controls", { concurrency: false }, async () => {
+  const pendingQueue = deferred();
+  const queueFetchStarted = deferred();
+  const row = {
+    actionId: "action-1",
+    messageId: "message-1",
+    leadId: "lead-1",
+    platform: "instagram",
+    recipient: {
+      displayName: "Alice",
+      handle: "alice",
+      profileUrl: "https://www.instagram.com/alice/",
+    },
+    message: "Hello",
+    messageType: "first_dm",
+  };
+
+  await withPanel({
+    queueFetch: () => {
+      queueFetchStarted.resolve();
+      return pendingQueue.promise;
+    },
+    async testBody({ data, document }) {
+      await queueFetchStarted.promise;
+      data.pausedItems = [row];
+      pendingQueue.resolve(new Response("upstream unavailable", { status: 503 }));
+      await settle();
+
+      assert.equal(document.getElementById("run-card").hidden, false);
+      assert.equal(document.getElementById("queue-card").hidden, true);
+      assert.equal(document.getElementById("resume-button").hidden, false);
+      assert.equal(document.getElementById("platform-select").disabled, true);
+    },
+  });
+});
+
 test("invalid stored platforms fall back and selector changes persist", { concurrency: false }, async () => {
   await withPanel({
     storage: { selectedPlatform: "facebook" },
@@ -349,6 +436,122 @@ test("paused Instagram rows override and lock a stored LinkedIn selection", { co
       await settle();
       assert.equal(document.getElementById("platform-select").disabled, false);
       assert.equal(requests.some(({ url }) => url.includes("platform=instagram")), true);
+    },
+  });
+});
+
+test("legacy paused Instagram rows resume with a viable platform recipient", { concurrency: false }, async () => {
+  const legacyPausedItem = {
+    actionId: "action-1",
+    messageId: "message-1",
+    leadId: "lead-1",
+    handle: "alice",
+    message: "Hello",
+    messageType: "first_dm",
+  };
+
+  await withPanel({
+    storage: { selectedPlatform: "linkedin", pausedItems: [legacyPausedItem] },
+    async testBody({ document, runtimeMessages }) {
+      assert.equal(document.getElementById("platform-select").value, "instagram");
+      assert.equal(document.getElementById("platform-select").disabled, true);
+
+      await document.getElementById("resume-button").trigger("click");
+      await settle();
+
+      const start = runtimeMessages.find(({ type }) => type === "START_BATCH");
+      assert.ok(start);
+      assert.deepEqual(start.payload.rows[0].recipient, {
+        displayName: null,
+        profileUrl: "https://www.instagram.com/alice/",
+        handle: "alice",
+      });
+      assert.equal(start.payload.rows[0].platform, "instagram");
+    },
+  });
+});
+
+test("Start locks platform selection while capability is pending", { concurrency: false }, async () => {
+  const pendingCapability = deferred();
+
+  await withPanel({
+    storage: { selectedPlatform: "instagram" },
+    async testBody({ data, document, requests, runtimeMessages, setCapabilityHandler }) {
+      setCapabilityHandler(() => pendingCapability.promise);
+      const startPromise = document.getElementById("start-button").trigger("click");
+      await settle();
+
+      const selector = document.getElementById("platform-select");
+      assert.equal(selector.disabled, true);
+      selector.value = "linkedin";
+      await selector.trigger("change");
+      assert.equal(data.selectedPlatform, "instagram");
+
+      pendingCapability.resolve({
+        ok: true,
+        platform: "instagram",
+        executable: true,
+        loggedIn: true,
+        loginMessage: "Log in to Instagram in this browser, then resume.",
+      });
+      await startPromise;
+      await settle();
+
+      const claim = requests.find(({ url }) => url.includes("/queue/claim"));
+      assert.ok(claim);
+      assert.equal(JSON.parse(claim.options.body).platform, "instagram");
+      const start = runtimeMessages.find(({ type }) => type === "START_BATCH");
+      assert.equal(start.payload.rows[0].platform, "instagram");
+    },
+  });
+});
+
+test("Start does not claim stale rows replaced by a same-platform refresh", { concurrency: false }, async () => {
+  const pendingCapability = deferred();
+  const refreshedQueue = queueResponse("instagram");
+  refreshedQueue.campaigns[0].items[0].actionId = "action-2";
+
+  await withPanel({
+    storage: { selectedPlatform: "instagram" },
+    async testBody({
+      document,
+      requests,
+      runtimeMessages,
+      setCapabilityHandler,
+      setQueueFetchHandler,
+    }) {
+      let capabilityCalls = 0;
+      setCapabilityHandler((message) => {
+        capabilityCalls += 1;
+        if (capabilityCalls === 1) return pendingCapability.promise;
+        return {
+          ok: true,
+          platform: message.platform,
+          executable: true,
+          loggedIn: true,
+          loginMessage: "Log in to Instagram in this browser, then resume.",
+        };
+      });
+      setQueueFetchHandler(() => new Response(JSON.stringify(refreshedQueue), { status: 200 }));
+
+      const startPromise = document.getElementById("start-button").trigger("click");
+      await settle();
+      await document.getElementById("refresh-queue-button").trigger("click");
+      await settle();
+
+      pendingCapability.resolve({
+        ok: true,
+        platform: "instagram",
+        executable: true,
+        loggedIn: true,
+        loginMessage: "Log in to Instagram in this browser, then resume.",
+      });
+      await startPromise;
+      await settle();
+
+      assert.equal(requests.some(({ url }) => url.includes("/queue/claim")), false);
+      assert.equal(runtimeMessages.some(({ type }) => type === "START_BATCH"), false);
+      assert.equal(document.getElementById("platform-select").disabled, false);
     },
   });
 });
