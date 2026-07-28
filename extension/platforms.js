@@ -4,6 +4,10 @@ export function isPlatform(value) {
   return PLATFORMS.includes(value);
 }
 
+export function platformLabel(platform) {
+  return platform === "linkedin" ? "LinkedIn" : "Instagram";
+}
+
 export function legacyInstagramProfileUrl(handle) {
   return `https://www.instagram.com/${encodeURIComponent(handle.replace(/^@+/, ""))}/`;
 }

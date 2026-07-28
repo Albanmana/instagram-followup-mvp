@@ -2,11 +2,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizeQueueItem,
+  platformLabel,
   recipientLabel,
   legacyInstagramProfileUrl,
 } from "../extension/platforms.js";
 
 const campaign = { id: "campaign-1", name: "Campaign" };
+
+test("returns human-readable labels for supported platforms", () => {
+  assert.equal(platformLabel("instagram"), "Instagram");
+  assert.equal(platformLabel("linkedin"), "LinkedIn");
+});
 
 test("normalizes a LinkedIn item with a canonical profile URL", () => {
   const item = normalizeQueueItem({

@@ -42,6 +42,14 @@
         </div>
 
         <div id="tab-today" role="tabpanel">
+          <label class="field platform-picker" for="platform-select">
+            <span class="label">Platform</span>
+            <select id="platform-select">
+              <option value="instagram">Instagram</option>
+              <option value="linkedin">LinkedIn</option>
+            </select>
+          </label>
+          <p id="platform-capability" class="muted" hidden></p>
           <div class="queue-toolbar">
             <span id="queue-sync-status" class="muted">Queue not refreshed yet.</span>
             <button id="refresh-queue-button" class="ghost" type="button">Refresh queue</button>

@@ -1,11 +1,18 @@
 import { createApiClient, chromeStorageAdapter } from "./api-client.js";
+import { isPlatform, platformLabel, recipientLabel } from "./platforms.js";
 
 const api = createApiClient({ storage: chromeStorageAdapter, baseUrl: "" });
 const $ = (id) => document.getElementById(id);
 
 const DEFAULT_DELAY_SECONDS = 400;
 const DEFAULT_QUEUE_POLLING_HOURS = 3;
-const state = { queue: null, nextSendAt: null, pausedItems: null };
+const state = {
+  queue: null,
+  nextSendAt: null,
+  pausedItems: null,
+  selectedPlatform: "instagram",
+  capability: null
+};
 
 let pollTimer = null;
 let countdownTimer = null;
@@ -39,9 +46,26 @@ async function getSettings() {
     coldDmAccount = "",
     coldDmBaseUrl = "",
     sendDelaySeconds = DEFAULT_DELAY_SECONDS,
-    queuePollingHours = DEFAULT_QUEUE_POLLING_HOURS
-  } = await chrome.storage.local.get(["coldDmApiKey", "coldDmAccount", "coldDmBaseUrl", "sendDelaySeconds", "queuePollingHours"]);
-  return { coldDmApiKey, coldDmAccount, coldDmBaseUrl, sendDelaySeconds, queuePollingHours };
+    queuePollingHours = DEFAULT_QUEUE_POLLING_HOURS,
+    selectedPlatform: storedPlatform
+  } = await chrome.storage.local.get([
+    "coldDmApiKey",
+    "coldDmAccount",
+    "coldDmBaseUrl",
+    "sendDelaySeconds",
+    "queuePollingHours",
+    "selectedPlatform"
+  ]);
+  const platform = isPlatform(storedPlatform) ? storedPlatform : "instagram";
+  if (storedPlatform !== platform) await chrome.storage.local.set({ selectedPlatform: platform });
+  return {
+    coldDmApiKey,
+    coldDmAccount,
+    coldDmBaseUrl,
+    sendDelaySeconds,
+    queuePollingHours,
+    selectedPlatform: platform
+  };
 }
 
 async function connect(key) {
@@ -51,8 +75,43 @@ async function connect(key) {
   return result;
 }
 
-function initials(handle) {
-  return handle.replace(/^@+/, "").slice(0, 2).toUpperCase();
+function selectedPlatform() {
+  return state.selectedPlatform;
+}
+
+function setPlatformControlsDisabled(disabled) {
+  $("platform-select").disabled = disabled;
+}
+
+async function getPlatformCapability(platform) {
+  return chrome.runtime.sendMessage({ type: "GET_PLATFORM_CAPABILITY", platform });
+}
+
+async function applySelectedPlatform(platform, { persist = true } = {}) {
+  const normalized = isPlatform(platform) ? platform : "instagram";
+  state.selectedPlatform = normalized;
+  $("platform-select").value = normalized;
+  if (persist) await chrome.storage.local.set({ selectedPlatform: normalized });
+}
+
+function recipientItem(entry) {
+  if (entry?.recipient) return entry;
+  return {
+    platform: isPlatform(entry?.platform) ? entry.platform : "instagram",
+    recipient: {
+      displayName: entry?.displayName ?? null,
+      handle: entry?.handle ?? null,
+      profileUrl: entry?.profileUrl ?? ""
+    }
+  };
+}
+
+function displayRecipient(entry) {
+  return recipientLabel(recipientItem(entry)) || "Unknown recipient";
+}
+
+function initials(label) {
+  return String(label ?? "").replace(/^@+/, "").slice(0, 2).toUpperCase();
 }
 
 function messagePreview(message) {
@@ -92,13 +151,14 @@ function renderList(entries) {
 
     const avatar = document.createElement("div");
     avatar.className = "avatar";
-    avatar.textContent = initials(entry.handle);
+    const recipient = displayRecipient(entry.item);
+    avatar.textContent = initials(recipient);
 
     const who = document.createElement("div");
     who.className = "who";
 
     const name = document.createElement("b");
-    name.textContent = `@${entry.handle}`;
+    name.textContent = recipient;
 
     const sub = document.createElement("span");
     sub.textContent = entry.sub ?? "";
@@ -115,31 +175,69 @@ function renderList(entries) {
   $("list-card").hidden = entries.length === 0;
 }
 
-async function checkInstagramLogin() {
-  const cookie = await chrome.cookies.get({
-    url: "https://www.instagram.com",
-    name: "sessionid"
-  });
-  return Boolean(cookie?.value);
+function clearDisplayedQueue() {
+  state.queue = null;
+  $("queue-card").hidden = true;
+  $("empty-card").hidden = true;
+  $("run-card").hidden = true;
+  renderList([]);
+  resetCapabilityDisplay();
+}
+
+function resetCapabilityDisplay() {
+  state.capability = null;
+  $("platform-capability").textContent = "";
+  $("platform-capability").hidden = true;
+  $("login-banner").hidden = true;
+  $("start-button").disabled = false;
+  $("start-button").textContent = "Start sending";
+}
+
+function applyCapability(capability, hasQueuedRows) {
+  state.capability = capability;
+  $("login-banner").textContent = capability.loginMessage ?? "";
+  const unavailable = hasQueuedRows && !capability.executable;
+  $("platform-capability").textContent = unavailable ? capability.reason ?? "Sending is not available yet." : "";
+  $("platform-capability").hidden = !unavailable;
+  $("start-button").disabled = unavailable;
+  $("start-button").textContent = unavailable ? "Sending not available yet" : "Start sending";
 }
 
 async function startRun(items) {
-  const loggedIn = await checkInstagramLogin();
-  if (!loggedIn) {
+  const platform = selectedPlatform();
+  const capability = await getPlatformCapability(platform);
+  if (!capability?.ok || capability.platform !== platform) {
+    setHeaderStatus(capability?.error ?? "Could not check platform availability", "");
+    return false;
+  }
+  applyCapability(capability, items.length > 0);
+  if (!capability.executable) return false;
+  if (!capability.loggedIn) {
+    $("login-banner").textContent = capability.loginMessage ?? `Log in to ${platformLabel(platform)} in this browser, then resume.`;
     $("login-banner").hidden = false;
-    return;
+    return false;
   }
 
   $("login-banner").hidden = true;
+  setPlatformControlsDisabled(true);
   clearQueuePolling();
   const { sendDelaySeconds } = await getSettings();
-  const claimed = await api.claimQueue(items);
+  const claimed = await api.claimQueue(items, platform);
   if (!claimed?.claimed?.length) {
     setHeaderStatus("Queue claim failed — refresh and try again", "");
-    return;
+    setPlatformControlsDisabled(false);
+    return false;
   }
   const claimedIds = new Set(claimed.claimed);
-  const rows = items.filter((item) => claimedIds.has(item.actionId)).map((item) => ({ ...item, handle: item.handle, message: item.message }));
+  const rows = items
+    .filter((item) => claimedIds.has(item.actionId))
+    .map((item) => ({
+      ...item,
+      platform,
+      recipient: item.recipient,
+      handle: item.recipient?.handle ?? item.handle ?? null,
+      message: item.message
+    }));
   const response = await chrome.runtime.sendMessage({
     type: "START_BATCH",
     payload: { rows, delaySeconds: sendDelaySeconds }
@@ -147,7 +245,8 @@ async function startRun(items) {
 
   if (!response?.ok) {
     setHeaderStatus(`Could not start: ${response?.error ?? "unknown error"}`, "");
-    return;
+    setPlatformControlsDisabled(false);
+    return false;
   }
 
   await chrome.action.setBadgeBackgroundColor({ color: "#17714F" });
@@ -155,11 +254,14 @@ async function startRun(items) {
   state.nextSendAt = Date.now() + sendDelaySeconds * 1000;
   lastSeenIndex = -1;
   await refreshToday();
+  return true;
 }
 
-function showIdleQueue(queue) {
+function showIdleQueue(queue, capability) {
   stopTimers();
+  setPlatformControlsDisabled(false);
   $("run-card").hidden = true;
+  applyCapability(capability, queue.items.length > 0);
 
   if (queue.items.length === 0) {
     $("queue-card").hidden = true;
@@ -171,11 +273,11 @@ function showIdleQueue(queue) {
   $("empty-card").hidden = true;
   $("queue-card").hidden = false;
   $("queue-count").textContent = `${queue.items.length} message${queue.items.length === 1 ? "" : "s"}`;
-  $("queue-campaign").textContent = `Campaign "${queue.campaign}" · prepared by Cold DM`;
+  $("queue-campaign").textContent = `${platformLabel(selectedPlatform())} · Campaign "${queue.campaign}" · prepared by Cold DM`;
   $("list-title").textContent = "Recipients";
   renderList(
     queue.items.map((item) => ({
-      handle: item.handle,
+      item,
       sub: `${messageTypeLabel(item.messageType)} · ${messagePreview(item.message)}`,
       status: "Pending",
       statusClass: "wait"
@@ -187,6 +289,10 @@ async function refreshToday({ automatic = false } = {}) {
   const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
   if (engine?.ok && engine.batchStatus === "running") {
     clearQueuePolling();
+    const runningPlatform = engine.batchQueue?.[0]?.platform;
+    await applySelectedPlatform(runningPlatform);
+    state.capability = await getPlatformCapability(selectedPlatform());
+    setPlatformControlsDisabled(true);
     renderRun(engine);
     return;
   }
@@ -195,6 +301,9 @@ async function refreshToday({ automatic = false } = {}) {
   if (Array.isArray(pausedItems) && pausedItems.length > 0) {
     clearQueuePolling();
     state.pausedItems = pausedItems;
+    await applySelectedPlatform(pausedItems[0]?.platform);
+    state.capability = await getPlatformCapability(selectedPlatform());
+    setPlatformControlsDisabled(true);
     $("queue-card").hidden = true;
     $("empty-card").hidden = true;
     $("run-card").hidden = false;
@@ -203,21 +312,27 @@ async function refreshToday({ automatic = false } = {}) {
     $("run-next").textContent = `Paused — ${pausedItems.length} message(s) remaining.`;
     setHeaderStatus("● Paused", "run");
     $("list-title").textContent = "Run";
-    renderList(pausedItems.map((item) => ({ handle: item.handle, sub: "-", status: "Pending", statusClass: "wait" })));
+    renderList(pausedItems.map((item) => ({ item, sub: "-", status: "Pending", statusClass: "wait" })));
     return;
   }
 
   const button = $("refresh-queue-button");
+  const platform = selectedPlatform();
   try {
     button.disabled = true;
     button.textContent = "Refreshing…";
     if (!automatic) setQueueSyncStatus("Refreshing queue…");
     await chrome.action.setBadgeText({ text: "" });
-    state.queue = await api.fetchQueue();
-    showIdleQueue(state.queue);
+    const queue = await api.fetchQueue(platform);
+    const capability = await getPlatformCapability(platform);
+    if (!capability?.ok) throw new Error(capability?.error ?? "Could not check platform availability");
+    if (platform !== selectedPlatform()) return;
+    state.queue = queue;
+    showIdleQueue(state.queue, capability);
     setQueueSyncStatus(`Updated ${new Date().toLocaleTimeString()}`);
     await scheduleQueuePolling();
   } catch (error) {
+    setPlatformControlsDisabled(false);
     setQueueSyncStatus(error instanceof Error ? error.message : "Could not refresh queue.", true);
   } finally {
     button.disabled = false;
@@ -232,18 +347,22 @@ function stopTimers() {
   countdownTimer = null;
 }
 
-function readableReason(error) {
+function readableReason(error, platform = selectedPlatform()) {
   const text = String(error ?? "");
   if (/not.?found|no such user|unavailable/i.test(text)) return "Profile not found";
   if (/message button|button/i.test(text)) return "Could not open the conversation";
-  if (/login|logged/i.test(text)) return "Instagram session expired";
+  if (/login|logged/i.test(text)) {
+    return state.capability?.platform === platform && state.capability.loginMessage
+      ? state.capability.loginMessage
+      : `Log in to ${platformLabel(platform)} in this browser, then resume.`;
+  }
   return "Could not send";
 }
 
 function statusEntry(row, log, isCurrent) {
   if (log?.status === "sent") {
     return {
-      handle: row.handle,
+      item: row,
       sub: `Sent at ${new Date(log.at).toLocaleTimeString()}`,
       status: "✓ Sent",
       statusClass: "ok"
@@ -252,22 +371,23 @@ function statusEntry(row, log, isCurrent) {
 
   if (log?.status === "error") {
     return {
-      handle: row.handle,
-      sub: readableReason(log.error),
+      item: row,
+      sub: readableReason(log.error, row.platform),
       status: "✗ Failed",
       statusClass: "fail"
     };
   }
 
   if (isCurrent) {
-    return { handle: row.handle, sub: "Sending...", status: "● Sending", statusClass: "run", current: true };
+    return { item: row, sub: "Sending...", status: "● Sending", statusClass: "run", current: true };
   }
 
-  return { handle: row.handle, sub: "-", status: "Pending", statusClass: "wait" };
+  return { item: row, sub: "-", status: "Pending", statusClass: "wait" };
 }
 
 function renderRun(engine) {
   clearQueuePolling();
+  setPlatformControlsDisabled(true);
   const { batchQueue = [], batchIndex = 0, batchLogs = [], batchDelay } = engine;
   const total = batchQueue.length;
   const doneCount = Math.min(batchIndex, total);
@@ -288,9 +408,9 @@ function renderRun(engine) {
     state.nextSendAt = Date.now() + (batchDelay ?? DEFAULT_DELAY_SECONDS) * 1000;
   }
 
-  const logByHandle = new Map(batchLogs.map((log) => [log.handle, log]));
+  const logByActionId = new Map(batchLogs.map((log) => [log.actionId, log]));
   $("list-title").textContent = "Run";
-  renderList(batchQueue.map((row, index) => statusEntry(row, logByHandle.get(row.handle), index === batchIndex)));
+  renderList(batchQueue.map((row, index) => statusEntry(row, logByActionId.get(row.actionId), index === batchIndex)));
   renderCountdown();
 
   if (!pollTimer) {
@@ -319,7 +439,8 @@ async function pollEngine() {
 
   if (engine.batchStatus === "running") {
     const lastLog = engine.batchLogs?.[engine.batchLogs.length - 1];
-    if (lastLog?.status === "error" && readableReason(lastLog.error) === "Instagram session expired") {
+    if (lastLog?.status === "error" && /login|logged/i.test(String(lastLog.error ?? ""))) {
+      $("login-banner").textContent = readableReason(lastLog.error, lastLog.platform);
       $("login-banner").hidden = false;
       await pauseRun();
       return;
@@ -337,16 +458,19 @@ async function pollEngine() {
 }
 
 async function reportEngineLogs(batchLogs) {
-  const results = batchLogs.map((log) => ({
-    actionId: log.actionId,
-    messageId: log.messageId,
-    leadId: log.leadId,
-    messageType: log.messageType ?? "first_dm",
-    handle: log.handle,
-    status: log.status === "sent" ? "sent" : "failed",
-    reason: log.status === "sent" ? undefined : readableReason(log.error),
-    at: log.at
-  }));
+  const results = batchLogs
+    .filter((log) => (log.platform ?? "instagram") === "instagram")
+    .map((log) => ({
+      actionId: log.actionId,
+      messageId: log.messageId,
+      leadId: log.leadId,
+      messageType: log.messageType ?? "first_dm",
+      platform: "instagram",
+      handle: log.recipient?.handle ?? log.handle ?? null,
+      status: log.status === "sent" ? "sent" : "failed",
+      reason: log.status === "sent" ? undefined : readableReason(log.error, "instagram"),
+      at: log.at
+    }));
 
   if (results.length > 0) await api.reportResults(results);
 }
@@ -358,6 +482,8 @@ async function pauseRun() {
   await reportEngineLogs(engine?.batchLogs ?? []);
   state.pausedItems = (engine?.batchQueue ?? []).slice(engine?.batchIndex ?? 0);
   await chrome.storage.local.set({ pausedItems: state.pausedItems });
+  if (state.pausedItems[0]?.platform) await applySelectedPlatform(state.pausedItems[0].platform);
+  setPlatformControlsDisabled(true);
   $("pause-button").hidden = true;
   $("resume-button").hidden = false;
   $("run-next").textContent = `Paused — ${state.pausedItems.length} message(s) remaining.`;
@@ -375,13 +501,14 @@ async function renderHistory() {
 
     const avatar = document.createElement("div");
     avatar.className = "avatar";
-    avatar.textContent = initials(entry.handle);
+    const recipient = displayRecipient(entry);
+    avatar.textContent = initials(recipient);
 
     const who = document.createElement("div");
     who.className = "who";
 
     const name = document.createElement("b");
-    name.textContent = `@${entry.handle}`;
+    name.textContent = recipient;
 
     const sub = document.createElement("span");
     const day = new Date(entry.at);
@@ -459,21 +586,31 @@ $("tab-history-button").addEventListener("click", async () => {
 
 $("refresh-queue-button").addEventListener("click", () => refreshToday());
 
+$("platform-select").addEventListener("change", async (event) => {
+  if ($("platform-select").disabled) return;
+  clearDisplayedQueue();
+  await applySelectedPlatform(event.target.value);
+  setQueueSyncStatus("Queue not refreshed yet.");
+  await refreshToday();
+});
+
 $("start-button").addEventListener("click", async () => {
   if (!state.queue || state.queue.items.length === 0) return;
   $("start-button").disabled = true;
-  await startRun(state.queue.items);
-  $("start-button").disabled = false;
+  const started = await startRun(state.queue.items);
+  if (!started && state.capability) applyCapability(state.capability, state.queue.items.length > 0);
 });
 
 $("pause-button").addEventListener("click", pauseRun);
 
 $("resume-button").addEventListener("click", async () => {
   const items = state.pausedItems ?? [];
-  state.pausedItems = null;
-  await chrome.storage.local.set({ pausedItems: null });
   lastSeenIndex = -1;
-  await startRun(items);
+  const started = await startRun(items);
+  if (started) {
+    state.pausedItems = null;
+    await chrome.storage.local.set({ pausedItems: null });
+  }
 });
 
 $("stop-button").addEventListener("click", async () => {
@@ -491,6 +628,7 @@ $("stop-button").addEventListener("click", async () => {
 
 async function enterMain() {
   const settings = await getSettings();
+  await applySelectedPlatform(settings.selectedPlatform, { persist: false });
   setHeaderStatus(`● Connected · ${settings.coldDmAccount}`, "ok");
   showView("main");
   showTab("today");
