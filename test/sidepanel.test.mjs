@@ -228,6 +228,7 @@ test("LinkedIn queue renders safely and Start has no sender side effects", { con
 
 test("a deferred queue refresh cannot overwrite a newly active run", { concurrency: false }, async () => {
   const pendingQueue = deferred();
+  const queueFetchStarted = deferred();
   const row = {
     actionId: "action-1",
     messageId: "message-1",
@@ -243,8 +244,12 @@ test("a deferred queue refresh cannot overwrite a newly active run", { concurren
   };
 
   await withPanel({
-    queueFetch: () => pendingQueue.promise,
+    queueFetch: () => {
+      queueFetchStarted.resolve();
+      return pendingQueue.promise;
+    },
     async testBody({ document, setBatchStatus }) {
+      await queueFetchStarted.promise;
       setBatchStatus({
         ok: true,
         batchStatus: "running",
@@ -258,6 +263,42 @@ test("a deferred queue refresh cannot overwrite a newly active run", { concurren
 
       assert.equal(document.getElementById("run-card").hidden, false);
       assert.equal(document.getElementById("queue-card").hidden, true);
+      assert.equal(document.getElementById("platform-select").disabled, true);
+    },
+  });
+});
+
+test("a deferred queue refresh cannot overwrite a newly paused run", { concurrency: false }, async () => {
+  const pendingQueue = deferred();
+  const queueFetchStarted = deferred();
+  const row = {
+    actionId: "action-1",
+    messageId: "message-1",
+    leadId: "lead-1",
+    platform: "instagram",
+    recipient: {
+      displayName: "Alice",
+      handle: "alice",
+      profileUrl: "https://www.instagram.com/alice/",
+    },
+    message: "Hello",
+    messageType: "first_dm",
+  };
+
+  await withPanel({
+    queueFetch: () => {
+      queueFetchStarted.resolve();
+      return pendingQueue.promise;
+    },
+    async testBody({ data, document }) {
+      await queueFetchStarted.promise;
+      data.pausedItems = [row];
+      pendingQueue.resolve(new Response(JSON.stringify(queueResponse("instagram")), { status: 200 }));
+      await settle();
+
+      assert.equal(document.getElementById("run-card").hidden, false);
+      assert.equal(document.getElementById("queue-card").hidden, true);
+      assert.equal(document.getElementById("resume-button").hidden, false);
       assert.equal(document.getElementById("platform-select").disabled, true);
     },
   });

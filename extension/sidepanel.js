@@ -296,28 +296,31 @@ async function showRunningEngine(engine) {
   return true;
 }
 
+async function showPausedItems(pausedItems) {
+  if (!Array.isArray(pausedItems) || pausedItems.length === 0) return false;
+  clearQueuePolling();
+  state.pausedItems = pausedItems;
+  await applySelectedPlatform(pausedItems[0]?.platform);
+  state.capability = await getPlatformCapability(selectedPlatform());
+  setPlatformControlsDisabled(true);
+  $("queue-card").hidden = true;
+  $("empty-card").hidden = true;
+  $("run-card").hidden = false;
+  $("pause-button").hidden = true;
+  $("resume-button").hidden = false;
+  $("run-next").textContent = `Paused — ${pausedItems.length} message(s) remaining.`;
+  setHeaderStatus("● Paused", "run");
+  $("list-title").textContent = "Run";
+  renderList(pausedItems.map((item) => ({ item, sub: "-", status: "Pending", statusClass: "wait" })));
+  return true;
+}
+
 async function refreshToday({ automatic = false } = {}) {
   const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
   if (await showRunningEngine(engine)) return;
 
   const { pausedItems } = await chrome.storage.local.get("pausedItems");
-  if (Array.isArray(pausedItems) && pausedItems.length > 0) {
-    clearQueuePolling();
-    state.pausedItems = pausedItems;
-    await applySelectedPlatform(pausedItems[0]?.platform);
-    state.capability = await getPlatformCapability(selectedPlatform());
-    setPlatformControlsDisabled(true);
-    $("queue-card").hidden = true;
-    $("empty-card").hidden = true;
-    $("run-card").hidden = false;
-    $("pause-button").hidden = true;
-    $("resume-button").hidden = false;
-    $("run-next").textContent = `Paused — ${pausedItems.length} message(s) remaining.`;
-    setHeaderStatus("● Paused", "run");
-    $("list-title").textContent = "Run";
-    renderList(pausedItems.map((item) => ({ item, sub: "-", status: "Pending", statusClass: "wait" })));
-    return;
-  }
+  if (await showPausedItems(pausedItems)) return;
 
   const button = $("refresh-queue-button");
   const platform = selectedPlatform();
@@ -332,6 +335,8 @@ async function refreshToday({ automatic = false } = {}) {
     if (platform !== selectedPlatform()) return;
     const latestEngine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
     if (await showRunningEngine(latestEngine)) return;
+    const { pausedItems: latestPausedItems } = await chrome.storage.local.get("pausedItems");
+    if (await showPausedItems(latestPausedItems)) return;
     state.queue = queue;
     showIdleQueue(state.queue, capability);
     setQueueSyncStatus(`Updated ${new Date().toLocaleTimeString()}`);
