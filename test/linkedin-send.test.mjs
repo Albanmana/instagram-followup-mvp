@@ -166,7 +166,7 @@ function withComposeDom({ recipientHidden = false, onSend = () => {} }, run) {
     sendButton.clicked = true;
     composer.textContent = "";
     composer.innerText = "";
-    onSend({ context, composer });
+    onSend({ context, composer, oldMessage });
   };
 
   globalThis.document = {
@@ -220,6 +220,36 @@ test("fails deterministically when only an old matching message is visible after
 
   try {
     await withComposeDom({}, async () => {
+      const outcome = await sendLinkedInComposeMessage(
+        "https://www.linkedin.com/in/alice/",
+        "Hello Alice"
+      );
+      assert.equal(outcome.status, "failed");
+      assert.match(outcome.reason, /did not confirm/i);
+    });
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
+test("fails when React replaces an old matching message without adding one", async () => {
+  const originalDateNow = Date.now;
+  let now = 0;
+  Date.now = () => {
+    now += 9_000;
+    return now;
+  };
+
+  try {
+    await withComposeDom({
+      onSend({ context, oldMessage }) {
+        context.children.splice(
+          context.children.indexOf(oldMessage),
+          1,
+          createElement({ text: "Hello Alice", parent: context })
+        );
+      },
+    }, async () => {
       const outcome = await sendLinkedInComposeMessage(
         "https://www.linkedin.com/in/alice/",
         "Hello Alice"

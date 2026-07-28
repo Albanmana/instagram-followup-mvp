@@ -128,7 +128,7 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
     return { status: "skipped", reason: "LinkedIn message composer is unavailable." };
   }
   const conversationRoot = activeConversationRoot(composer, visibleProfile);
-  const visibleMessagesBeforeSend = new Set(visibleMatchingElements(conversationRoot, textToSend));
+  const visibleMessageCountBeforeSend = visibleMatchingElements(conversationRoot, textToSend).length;
 
   composer.focus();
   const selection = getSelection();
@@ -155,10 +155,8 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
   sendButton.click();
   const sent = await waitFor(() => {
     const composerIsEmpty = elementText(composer) === "";
-    const sentTextIsVisible = visibleMatchingElements(conversationRoot, textToSend).some((element) =>
-      !visibleMessagesBeforeSend.has(element)
-    );
-    return composerIsEmpty && sentTextIsVisible;
+    const visibleMessageCountAfterSend = visibleMatchingElements(conversationRoot, textToSend).length;
+    return composerIsEmpty && visibleMessageCountAfterSend > visibleMessageCountBeforeSend;
   });
 
   return sent
