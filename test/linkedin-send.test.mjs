@@ -124,13 +124,14 @@ test("discovers only the observed Message compose link on the expected profile",
   }
 });
 
-test("skips compose sending when the visible recipient is not the expected profile", async () => {
+test("skips compose sending when the compose recipient chip is unavailable", async () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;
   globalThis.document = {
+    location: { href: "https://www.linkedin.com/messaging/compose/?recipient=alice" },
     querySelector(selector) {
-      if (selector === 'a[href*="/in/"]') {
-        return { getAttribute: () => "/in/not-alice/" };
+      if (selector === 'button[aria-label^="Remove "]') {
+        return null;
       }
       throw new Error(`Unexpected selector: ${selector}`);
     },
@@ -182,7 +183,7 @@ function withComposeDom({ recipientHidden = false, onSend = () => {} }, run) {
     InputEvent: globalThis.InputEvent,
   };
   const oldMessage = createElement({ text: "Hello Alice" });
-  const recipient = createElement({ href: "/in/alice/", hidden: recipientHidden });
+  const recipient = createElement({ text: "Alice", hidden: recipientHidden });
   const composer = createElement();
   const context = createElement({ children: [recipient, oldMessage, composer] });
   const sendButton = createElement();
@@ -194,8 +195,9 @@ function withComposeDom({ recipientHidden = false, onSend = () => {} }, run) {
   };
 
   globalThis.document = {
+    location: { href: "https://www.linkedin.com/messaging/compose/?recipient=alice" },
     querySelector(selector) {
-      if (selector === 'a[href*="/in/"]') return recipient;
+      if (selector === 'button[aria-label^="Remove "]') return recipient;
       if (selector === '[contenteditable="true"][role="textbox"][aria-label="Write a message…"]') return composer;
       if (selector === 'button[type="submit"]:not([disabled])') return sendButton;
       throw new Error(`Unexpected selector: ${selector}`);

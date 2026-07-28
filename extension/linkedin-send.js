@@ -113,8 +113,12 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
     return { status: "skipped", reason: "The expected LinkedIn profile is invalid." };
   }
 
-  const visibleProfile = document.querySelector('a[href*="/in/"]');
-  if (!isVisible(visibleProfile) || profileIdentity(visibleProfile.getAttribute("href")) !== expectedIdentity) {
+  const composeUrl = new URL(document.location.href, "https://www.linkedin.com");
+  const recipientId = composeUrl.pathname === "/messaging/compose/"
+    ? composeUrl.searchParams.get("recipient")
+    : null;
+  const recipientChip = document.querySelector('button[aria-label^="Remove "]');
+  if (!recipientId || !isVisible(recipientChip)) {
     return { status: "skipped", reason: "The compose recipient does not match the expected LinkedIn profile." };
   }
 
@@ -127,7 +131,7 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
   if (!composer) {
     return { status: "skipped", reason: "LinkedIn message composer is unavailable." };
   }
-  const conversationRoot = activeConversationRoot(composer, visibleProfile);
+  const conversationRoot = activeConversationRoot(composer, recipientChip);
   const visibleMessageCountBeforeSend = visibleMatchingElements(conversationRoot, textToSend).length;
 
   composer.focus();
