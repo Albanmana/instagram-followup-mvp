@@ -1,13 +1,34 @@
 // Authenticated bridge between the sender extension and Cold DM App.
 // The extension receives executable actions only: no prompts or profile data.
 
+import { isPlatform, normalizeQueueItem } from "./platforms.js";
+
 const RESULTS_KEY = "reportedResults";
 const MAX_STORED_RESULTS = 1000;
 
 export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, now = () => new Date() }) {
   const mockMode = baseUrl === undefined;
   const defaultBaseUrl = "http://localhost:3000";
-  const mockQueue = { campaign: "Local test queue", items: [{ actionId: "00000000-0000-4000-8000-000000000001", messageId: "00000000-0000-4000-8000-000000000002", leadId: "00000000-0000-4000-8000-000000000003", handle: "local.test", message: "Test message", messageType: "first_dm" }] };
+
+  function getMockQueue(platform) {
+    const rawItem = {
+      actionId: "00000000-0000-4000-8000-000000000001",
+      messageId: "00000000-0000-4000-8000-000000000002",
+      leadId: "00000000-0000-4000-8000-000000000003",
+      platform,
+      handle: "local.test",
+      displayName: "Local Test",
+      profileUrl: platform === "linkedin"
+        ? "https://www.linkedin.com/in/local.test/"
+        : "https://www.instagram.com/local.test/",
+      message: "Test message",
+      messageType: "first_dm",
+    };
+    return {
+      campaign: "Local test queue",
+      items: [normalizeQueueItem(rawItem, { name: "Local test queue" })],
+    };
+  }
 
   async function getStoredResults() {
     const { [RESULTS_KEY]: results = [] } = await storage.get(RESULTS_KEY);
@@ -48,26 +69,32 @@ export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, 
     }
   }
 
-  async function fetchQueue() {
+  async function fetchQueue(platform) {
+    if (!isPlatform(platform)) throw new Error("A supported platform is required");
     if (mockMode) {
       const today = now().toISOString().slice(0, 10);
       const done = new Set((await getStoredResults()).filter((item) => (item.at ?? "").startsWith(today)).map((item) => item.handle));
-      return { ...mockQueue, items: mockQueue.items.filter((item) => !done.has(item.handle)) };
+      const queue = getMockQueue(platform);
+      return { ...queue, items: queue.items.filter((item) => !done.has(item.recipient.handle)) };
     }
-    const response = await request("/api/ext/v1/queue");
+    const query = new URLSearchParams({ platform });
+    const response = await request(`/api/ext/v1/queue?${query}`);
     const campaigns = Array.isArray(response.campaigns) ? response.campaigns : [];
     return {
       campaigns,
       campaign: campaigns[0]?.campaign?.name ?? null,
       items: campaigns.flatMap(({ campaign, items = [] }) =>
-        items.map((item) => ({ ...item, campaign }))
-      ),
+        (Array.isArray(items) ? items : [])
+          .map((item) => normalizeQueueItem(item, campaign))
+          .filter((item) => item?.platform === platform)
+      ).filter(Boolean),
     };
   }
 
-  async function claimQueue(items) {
+  async function claimQueue(items, platform) {
+    if (!isPlatform(platform)) throw new Error("A supported platform is required");
     if (mockMode) return { claimed: items.map((item) => item.actionId), skipped: [] };
-    const response = await request("/api/ext/v1/queue/claim", { method: "POST", body: JSON.stringify({ actionIds: items.map((item) => item.actionId) }) });
+    const response = await request("/api/ext/v1/queue/claim", { method: "POST", body: JSON.stringify({ actionIds: items.map((item) => item.actionId), platform }) });
     return {
       claimed: Array.isArray(response.claimed) ? response.claimed : [],
       skipped: Array.isArray(response.skipped) ? response.skipped : []

@@ -27,27 +27,27 @@ test("verifyApiKey accepts cdm_ keys and rejects others", async () => {
 
 test("fetchQueue returns campaign and items", async () => {
   const api = createApiClient({ storage: memoryStorage(), now: NOW });
-  const queue = await api.fetchQueue();
+  const queue = await api.fetchQueue("instagram");
   assert.equal(typeof queue.campaign, "string");
   assert.ok(queue.items.length > 0);
-  assert.ok(queue.items.every((item) => item.handle && item.message));
+  assert.ok(queue.items.every((item) => item.platform === "instagram" && item.recipient.handle && item.recipient.profileUrl && item.message));
 });
 
 test("fetchQueue excludes handles already reported today", async () => {
   const api = createApiClient({ storage: memoryStorage(), now: NOW });
-  const before = await api.fetchQueue();
+  const before = await api.fetchQueue("instagram");
   const first = before.items[0];
-  await api.reportResults([{ handle: first.handle, status: "sent", at: "2026-07-19T09:00:00Z" }]);
-  const after = await api.fetchQueue();
+  await api.reportResults([{ handle: first.recipient.handle, status: "sent", at: "2026-07-19T09:00:00Z" }]);
+  const after = await api.fetchQueue("instagram");
   assert.equal(after.items.length, before.items.length - 1);
-  assert.ok(!after.items.some((item) => item.handle === first.handle));
+  assert.ok(!after.items.some((item) => item.recipient.handle === first.recipient.handle));
 });
 
 test("fetchQueue does NOT exclude handles reported on previous days", async () => {
   const api = createApiClient({ storage: memoryStorage(), now: NOW });
-  const before = await api.fetchQueue();
-  await api.reportResults([{ handle: before.items[0].handle, status: "sent", at: "2026-07-18T09:00:00Z" }]);
-  const after = await api.fetchQueue();
+  const before = await api.fetchQueue("instagram");
+  await api.reportResults([{ handle: before.items[0].recipient.handle, status: "sent", at: "2026-07-18T09:00:00Z" }]);
+  const after = await api.fetchQueue("instagram");
   assert.equal(after.items.length, before.items.length);
 });
 
@@ -79,7 +79,7 @@ test("claimQueue normalizes the Cold DM claimed action IDs", async () => {
     baseUrl: "https://cold-dm.example",
     fetchFn: async () => new Response(JSON.stringify({ claimed: ["action-1"], skipped: ["action-2"] }), { status: 200 })
   });
-  const result = await api.claimQueue([{ actionId: "action-1" }, { actionId: "action-2" }]);
+  const result = await api.claimQueue([{ actionId: "action-1" }, { actionId: "action-2" }], "instagram");
   assert.deepEqual(result, { claimed: ["action-1"], skipped: ["action-2"] });
 });
 
@@ -93,6 +93,66 @@ test("fetchQueue preserves first-DM and follow-up message types", async () => {
       { actionId: "action-2", messageId: "message-2", leadId: "lead-2", handle: "follow", message: "Checking in", messageType: "followup" }
     ] }] }), { status: 200 })
   });
-  const queue = await api.fetchQueue();
+  const queue = await api.fetchQueue("instagram");
   assert.deepEqual(queue.items.map((item) => item.messageType), ["first_dm", "followup"]);
+});
+
+test("fetchQueue requests and preserves the selected platform", async () => {
+  const requests = [];
+  const api = createApiClient({
+    storage: memoryStorage({ coldDmApiKey: "cdm_live_test", coldDmBaseUrl: "https://cold-dm.example" }),
+    baseUrl: "https://cold-dm.example",
+    fetchFn: async (url, options = {}) => {
+      requests.push({ url, options });
+      return new Response(JSON.stringify({ campaigns: [{ campaign: { id: "campaign-1", name: "Campaign" }, items: [{
+        actionId: "action-1", messageId: "message-1", leadId: "lead-1", platform: "linkedin",
+        profileUrl: "https://www.linkedin.com/in/alice/", displayName: "Alice", handle: "alice",
+        message: "Hello", messageType: "first_dm",
+      }] }] }), { status: 200 });
+    },
+  });
+  const queue = await api.fetchQueue("linkedin");
+  assert.match(requests[0].url, /\/api\/ext\/v1\/queue\?platform=linkedin$/);
+  assert.equal(queue.items[0].platform, "linkedin");
+  assert.equal(queue.items[0].recipient.profileUrl, "https://www.linkedin.com/in/alice/");
+});
+
+test("claimQueue sends the selected platform", async () => {
+  let body;
+  const api = createApiClient({
+    storage: memoryStorage({ coldDmApiKey: "cdm_live_test", coldDmBaseUrl: "https://cold-dm.example" }),
+    baseUrl: "https://cold-dm.example",
+    fetchFn: async (_url, options) => { body = JSON.parse(options.body); return new Response(JSON.stringify({ claimed: ["action-1"], skipped: [] }), { status: 200 }); },
+  });
+  await api.claimQueue([{ actionId: "action-1" }], "instagram");
+  assert.deepEqual(body, { actionIds: ["action-1"], platform: "instagram" });
+});
+
+test("fetchQueue discards invalid and mismatched-platform server rows", async () => {
+  const api = createApiClient({
+    storage: memoryStorage({ coldDmApiKey: "cdm_live_test", coldDmBaseUrl: "https://cold-dm.example" }),
+    baseUrl: "https://cold-dm.example",
+    fetchFn: async () => new Response(JSON.stringify({ campaigns: [{ campaign: { id: "campaign-1", name: "Campaign" }, items: [
+      { actionId: "linkedin-1", messageId: "message-1", leadId: "lead-1", platform: "linkedin", profileUrl: "https://www.linkedin.com/in/alice/", message: "Hello" },
+      { actionId: "instagram-1", messageId: "message-2", leadId: "lead-2", platform: "instagram", profileUrl: "https://www.instagram.com/alice/", message: "Hello" },
+      { actionId: "linkedin-invalid", messageId: "message-3", leadId: "lead-3", platform: "linkedin", message: "Hello" },
+    ] }] }), { status: 200 }),
+  });
+
+  const queue = await api.fetchQueue("linkedin");
+
+  assert.deepEqual(queue.items.map((item) => item.actionId), ["linkedin-1"]);
+});
+
+test("platform queue calls reject unsupported platforms before requesting", async () => {
+  let requests = 0;
+  const api = createApiClient({
+    storage: memoryStorage({ coldDmApiKey: "cdm_live_test", coldDmBaseUrl: "https://cold-dm.example" }),
+    baseUrl: "https://cold-dm.example",
+    fetchFn: async () => { requests += 1; return new Response("{}", { status: 200 }); },
+  });
+
+  await assert.rejects(api.fetchQueue("facebook"), /platform/i);
+  await assert.rejects(api.claimQueue([], "facebook"), /platform/i);
+  assert.equal(requests, 0);
 });
