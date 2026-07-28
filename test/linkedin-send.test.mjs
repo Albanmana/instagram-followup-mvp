@@ -6,6 +6,8 @@ import {
   isLinkedInComposeHref,
   profileIdentityFromUrl,
   classifyLinkedInUnavailable,
+  discoverLinkedInComposeHref,
+  sendLinkedInComposeMessage,
 } from "../extension/linkedin-send.js";
 
 test("accepts a canonical LinkedIn profile and non-empty message", () => {
@@ -65,4 +67,58 @@ test("classifies unavailable direct messaging as skipped with an ISO timestamp",
     reason: "LinkedIn Message action is unavailable for this profile.",
   });
   assert.ok(Number.isFinite(Date.parse(outcome.at)));
+});
+
+test("discovers only the observed Message compose link on the expected profile", () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/alice/?trk=feed" },
+    querySelectorAll(selector) {
+      assert.equal(selector, "a");
+      return [
+        {
+          textContent: "Connect",
+          getAttribute: () => "/messaging/compose/?recipient=other",
+        },
+        {
+          textContent: "Message",
+          getAttribute: (attribute) => attribute === "href"
+            ? "/messaging/compose/?recipient=alice"
+            : null,
+        },
+      ];
+    },
+  };
+
+  try {
+    assert.deepEqual(
+      discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/"),
+      { status: "ready", composeHref: "/messaging/compose/?recipient=alice" }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
+test("skips compose sending when the visible recipient is not the expected profile", async () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    querySelector(selector) {
+      if (selector === 'a[href*="/in/"]') {
+        return { getAttribute: () => "/in/not-alice/" };
+      }
+      throw new Error(`Unexpected selector: ${selector}`);
+    },
+  };
+
+  try {
+    const outcome = await sendLinkedInComposeMessage(
+      "https://www.linkedin.com/in/alice/",
+      "Hello Alice"
+    );
+    assert.equal(outcome.status, "skipped");
+    assert.match(outcome.reason, /recipient/i);
+  } finally {
+    globalThis.document = originalDocument;
+  }
 });
