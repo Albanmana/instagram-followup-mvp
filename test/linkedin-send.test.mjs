@@ -127,6 +127,12 @@ test("discovers only the observed Message compose link on the expected profile",
 test("skips compose sending when the compose recipient chip is unavailable", async () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;
+  const originalDateNow = Date.now;
+  let now = 0;
+  Date.now = () => {
+    now += 9_000;
+    return now;
+  };
   globalThis.document = {
     location: { href: "https://www.linkedin.com/messaging/compose/?recipient=alice" },
     querySelector(selector) {
@@ -148,6 +154,7 @@ test("skips compose sending when the compose recipient chip is unavailable", asy
   } finally {
     globalThis.document = originalDocument;
     globalThis.getComputedStyle = originalGetComputedStyle;
+    Date.now = originalDateNow;
   }
 });
 
@@ -175,7 +182,7 @@ function createElement({ text = "", href = null, parent = null, children = [], h
   return element;
 }
 
-function withComposeDom({ recipientHidden = false, onSend = () => {} }, run) {
+function withComposeDom({ recipientHidden = false, recipientAvailableAfterChecks = 0, onSend = () => {} }, run) {
   const original = {
     document: globalThis.document,
     getComputedStyle: globalThis.getComputedStyle,
@@ -187,6 +194,7 @@ function withComposeDom({ recipientHidden = false, onSend = () => {} }, run) {
   const composer = createElement();
   const context = createElement({ children: [recipient, oldMessage, composer] });
   const sendButton = createElement();
+  let recipientChecks = 0;
   sendButton.click = () => {
     sendButton.clicked = true;
     composer.textContent = "";
@@ -197,7 +205,10 @@ function withComposeDom({ recipientHidden = false, onSend = () => {} }, run) {
   globalThis.document = {
     location: { href: "https://www.linkedin.com/messaging/compose/?recipient=alice" },
     querySelector(selector) {
-      if (selector === 'button[aria-label^="Remove "]') return recipient;
+      if (selector === 'button[aria-label^="Remove "]') {
+        recipientChecks += 1;
+        return recipientChecks > recipientAvailableAfterChecks ? recipient : null;
+      }
       if (selector === '[contenteditable="true"][role="textbox"][aria-label="Write a message…"]') return composer;
       if (selector === 'button[type="submit"]:not([disabled])') return sendButton;
       throw new Error(`Unexpected selector: ${selector}`);
@@ -233,6 +244,21 @@ test("confirms a newly rendered matching message in the active compose context",
     );
     assert.deepEqual(outcome, { status: "sent", sentText: "Hello Alice" });
     assert.equal(sendButton.clicked, true);
+  });
+});
+
+test("waits for the LinkedIn recipient chip before deciding the compose recipient is unavailable", async () => {
+  await withComposeDom({
+    recipientAvailableAfterChecks: 1,
+    onSend({ context }) {
+      context.children.push(createElement({ text: "Hello Alice", parent: context }));
+    },
+  }, async () => {
+    const outcome = await sendLinkedInComposeMessage(
+      "https://www.linkedin.com/in/alice/",
+      "Hello Alice"
+    );
+    assert.equal(outcome.status, "sent");
   });
 });
 

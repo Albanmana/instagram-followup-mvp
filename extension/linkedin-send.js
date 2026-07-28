@@ -117,8 +117,11 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
   const recipientId = composeUrl.pathname === "/messaging/compose/"
     ? composeUrl.searchParams.get("recipient")
     : null;
-  const recipientChip = document.querySelector('button[aria-label^="Remove "]');
-  if (!recipientId || !isVisible(recipientChip)) {
+  const recipientChip = await waitFor(() => {
+    const chip = document.querySelector('button[aria-label^="Remove "]');
+    return recipientId && isVisible(chip) ? chip : null;
+  });
+  if (!recipientChip) {
     return { status: "skipped", reason: "The compose recipient does not match the expected LinkedIn profile." };
   }
 
