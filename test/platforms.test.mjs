@@ -41,3 +41,19 @@ test("migrates a legacy Instagram row only when it has a handle", () => {
   assert.equal(item.recipient.profileUrl, legacyInstagramProfileUrl("cold.dm"));
   assert.equal(normalizeQueueItem({ message: "Hello" }, campaign), null);
 });
+
+test("does not migrate an explicitly unsupported platform to Instagram", () => {
+  const item = normalizeQueueItem({
+    actionId: "action-1", messageId: "message-1", leadId: "lead-1",
+    platform: "facebook", handle: "x", message: "Hello", messageType: "first_dm",
+  }, campaign);
+  assert.equal(item, null);
+});
+
+test("rejects a legacy row whose handle is not a non-empty string", () => {
+  const item = normalizeQueueItem({
+    actionId: "action-1", messageId: "message-1", leadId: "lead-1",
+    handle: 123, message: "Hello", messageType: "first_dm",
+  }, campaign);
+  assert.equal(item, null);
+});

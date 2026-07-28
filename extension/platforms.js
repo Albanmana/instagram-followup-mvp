@@ -9,11 +9,12 @@ export function legacyInstagramProfileUrl(handle) {
 }
 
 export function normalizeQueueItem(raw, campaign = null) {
+  const hasLegacyHandle = typeof raw?.handle === "string" && raw.handle.length > 0;
   const platform = isPlatform(raw?.platform)
     ? raw.platform
-    : raw?.handle ? "instagram" : null;
+    : raw?.platform == null && hasLegacyHandle ? "instagram" : null;
   const profileUrl = raw?.recipient?.profileUrl ?? raw?.profileUrl
-    ?? (platform === "instagram" && raw?.handle ? legacyInstagramProfileUrl(raw.handle) : null);
+    ?? (platform === "instagram" && hasLegacyHandle ? legacyInstagramProfileUrl(raw.handle) : null);
   if (!platform || !profileUrl || !raw?.actionId || !raw?.messageId || !raw?.leadId || !raw?.message) return null;
   return {
     actionId: raw.actionId, messageId: raw.messageId, leadId: raw.leadId,
