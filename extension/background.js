@@ -1,6 +1,11 @@
 import { createPlatformAdapters, getPlatformAdapter } from "./platform-adapters.js";
 import { validateBatchRows } from "./batch-validation.js";
 import { normalizePersistedQueueItems } from "./platforms.js";
+import {
+  discoverLinkedInComposeHref,
+  sendLinkedInComposeMessage,
+  validateLinkedInTestPayload,
+} from "./linkedin-send.js";
 
 // ── Defaults (from .env) ─────────────────────────────────────
 const DEFAULT_BATCH_DELAY = 400;
@@ -25,6 +30,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "SEND_LINKEDIN_TEST_MESSAGE") {
+    sendLinkedInTestMessage(message.payload)
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+
+    return true;
+  }
+
   if (message?.type !== "SEND_TEST_MESSAGE") {
     return false;
   }
@@ -35,6 +48,71 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return true;
 });
+
+export async function sendLinkedInTestMessage(rawPayload) {
+  const payload = validateLinkedInTestPayload(rawPayload);
+  await clearRunLogs();
+  await appendRunLog("linkedin-test", "Starting temporary LinkedIn send test.");
+
+  try {
+    const tab = await chrome.tabs.create({ url: payload.profileUrl, active: true });
+    if (!tab.id) {
+      throw new Error("Chrome did not return a tab id.");
+    }
+
+    await appendRunLog("linkedin-test", `Opened profile tab ${tab.id}; waiting for load.`);
+    await waitForTabLoad(tab.id);
+
+    const [discoveryExecution] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: discoverLinkedInComposeHref,
+      args: [payload.profileUrl],
+    });
+    if (discoveryExecution?.error) {
+      throw new Error(`LinkedIn profile discovery failed: ${discoveryExecution.error.message ?? "unknown scripting error"}`);
+    }
+
+    const discovery = discoveryExecution?.result;
+    if (!discovery) {
+      throw new Error("LinkedIn profile discovery returned no structured result.");
+    }
+    if (discovery.status !== "ready") {
+      await appendRunLog("linkedin-test", `Profile discovery ended with ${discovery.status ?? "unknown"}.`);
+      return { ...discovery, at: discovery.at ?? new Date().toISOString() };
+    }
+
+    const composeUrl = new URL(discovery.composeHref, "https://www.linkedin.com").href;
+    await appendRunLog("linkedin-test", `Navigating tab ${tab.id} to the observed compose link.`);
+    await chrome.tabs.update(tab.id, { url: composeUrl });
+    await waitForTabLoad(tab.id);
+
+    const [sendExecution] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: sendLinkedInComposeMessage,
+      args: [payload.profileUrl, payload.message],
+    });
+    if (sendExecution?.error) {
+      throw new Error(`LinkedIn compose send failed: ${sendExecution.error.message ?? "unknown scripting error"}`);
+    }
+
+    const result = sendExecution?.result;
+    if (!result) {
+      throw new Error("LinkedIn compose send returned no structured result.");
+    }
+
+    const outcome = { ...result, at: new Date().toISOString() };
+    await appendRunLog("linkedin-test", `Compose step completed with ${outcome.status ?? "unknown"}.`);
+    return outcome;
+  } catch (error) {
+    const outcome = {
+      status: "failed",
+      reason: error instanceof Error ? error.message : String(error),
+      at: new Date().toISOString(),
+    };
+    await appendRunLog("linkedin-test", `Temporary LinkedIn send test failed: ${outcome.reason}`);
+    return outcome;
+  }
+}
 
 async function sendInstagramMessage({ recipient, handle = recipient?.handle, message, has_gif, gif_query }) {
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

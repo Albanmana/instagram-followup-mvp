@@ -31,6 +31,16 @@ test("rejects non-profile URLs and blank messages", () => {
   }), /message is required/);
 });
 
+test("does not classify an invalid LinkedIn test payload as sent", () => {
+  assert.throws(
+    () => validateLinkedInTestPayload({
+      profileUrl: "https://linkedin.com/feed/",
+      message: "Test",
+    }),
+    /profile URL/
+  );
+});
+
 test("recognizes only LinkedIn compose hrefs and normalizes profile identity", () => {
   assert.equal(isLinkedInComposeHref("/messaging/compose/?recipient=abc"), true);
   assert.equal(isLinkedInComposeHref("/messaging/?recipient=abc"), false);
