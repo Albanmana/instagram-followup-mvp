@@ -1,85 +1,83 @@
-# Full App Architecture
+# Cold DM Sender Architecture
 
 ## Product Direction
 
-The full version is a local-first Instagram follow-up assistant:
+The extension is a browser-side operator for actions prepared by the Cold DM
+App. It does not own a local CRM, sequence scheduler, or another queue/result
+integration. The Cold DM App API is the sole source of executable actions and
+the sole destination for claims and results.
 
-- First DM can stay manual.
-- Follow-ups are scheduled from a local sequence.
-- The browser extension is the Instagram operator.
-- A local companion app owns state, timing, and reporting.
+Release boundary:
+
+- Instagram is executable: an authenticated browser can claim and process its
+  Cold DM queue.
+- LinkedIn is foundation-only: the side panel can display a LinkedIn queue but
+  must keep sending disabled. It creates no remote claim, send, or result
+  action until Phase 2 enables that adapter.
 
 ## Stack
 
 ### Browser Layer
 
 - Chrome Extension, Manifest V3
-- Popup or side panel UI
-- Background service worker for orchestration
-- `chrome.alarms` for periodic wake-ups
-- `chrome.scripting` for Instagram automation
+- Side panel for platform selection, queue display, settings, and run state
+- Background service worker for queue execution and result reporting
+- Platform adapter registry that gates execution by capability
+- Instagram automation adapter for the executable Phase-1 path
 
-### Local App Layer
+### Cold DM App API
 
-- Node.js
-- Fastify for local HTTP API
-- SQLite for persistence
-- Drizzle for schema and queries
+- `GET /api/ext/v1/queue?platform=instagram|linkedin` supplies only the chosen
+  platform's queue.
+- `POST /api/ext/v1/queue/claim` claims action IDs for the same platform.
+- `POST /api/ext/v1/results` records execution results.
+- The extension authenticates these calls with the configured Cold DM API key.
 
-### Future AI Layer
+The app is responsible for server-side validation, platform filtering,
+cross-platform claim protection, and message/action state transitions.
 
-- OpenAI or Ollama
-- Sequence drafting
-- Message personalization
-- Reply classification
+## Queue Item Boundary
 
-## Planned Data Model
+Each normalized queue item includes:
 
-### leads
+- `platform` (`instagram` or `linkedin`)
+- `actionId`, `messageId`, and `leadId`
+- recipient `profileUrl`, optional `displayName`, and optional `handle`
+- message body and message type
+- campaign metadata
 
-- `id`
-- `instagram_handle`
-- `status`
-- `created_at`
-- `last_reply_at`
-
-### sequences
-
-- `id`
-- `name`
-- `max_steps`
-
-### sequence_steps
-
-- `id`
-- `sequence_id`
-- `step_index`
-- `delay_hours`
-- `message_template`
-
-### lead_sequences
-
-- `id`
-- `lead_id`
-- `sequence_id`
-- `current_step`
-- `next_send_at`
-- `status`
-
-### message_logs
-
-- `id`
-- `lead_id`
-- `sequence_step_id`
-- `message_body`
-- `sent_at`
-- `status`
-- `error_message`
+The extension fetches, claims, and reports against the selected platform only.
+It preserves `platform` in its local run and result records so output cannot be
+mistaken for another platform.
 
 ## Runtime Model
 
-1. Extension registers or updates a lead.
-2. Local app decides which step is due.
-3. Extension opens Instagram and sends the next message.
-4. Result is written to the local app.
-5. Sequence stops on reply, limit reached, or repeated failure.
+1. The user selects a platform in the side panel.
+2. The extension fetches that platform's queue from the Cold DM App API.
+3. It checks the selected platform adapter's capability before any side effect.
+4. For Instagram, it claims the selected actions, sends through the browser,
+   and reports results to the Cold DM App API.
+5. For LinkedIn, it renders the prepared queue and the locked status, then
+   stops. No claim, send, or result request is made.
+
+## API Handoff Before Live Use
+
+The Cold DM App owner must implement and independently verify:
+
+1. `GET /api/ext/v1/queue?platform=instagram|linkedin` with server-side
+   validation and filtering.
+2. Queue items with the platform, recipient identity/profile data, message
+   body/type, existing IDs, and campaign metadata.
+3. `POST /api/ext/v1/queue/claim` accepting `platform` and rejecting
+   cross-platform action IDs.
+4. Result validation and persistence that accepts `platform` while retaining
+   the existing message/action transitions.
+
+The extension's mock queue is platform-aware for local development. It is not
+a replacement for the deployed API contract, and it must not be used to claim
+that live LinkedIn queue display is available.
+
+## Historical Code
+
+`extension/archive/` is retained for historical reference only. It is not part
+of the active runtime, setup, queue, or reporting flow.
