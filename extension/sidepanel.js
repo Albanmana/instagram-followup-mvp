@@ -498,16 +498,17 @@ async function pollEngine() {
 
 async function reportEngineLogs(batchLogs) {
   const results = batchLogs
-    .filter((log) => (log.platform ?? "instagram") === "instagram")
     .map((log) => ({
       actionId: log.actionId,
       messageId: log.messageId,
       leadId: log.leadId,
       messageType: log.messageType ?? "first_dm",
-      platform: "instagram",
+      platform: log.platform ?? "instagram",
       handle: log.recipient?.handle ?? log.handle ?? null,
-      status: log.status === "sent" ? "sent" : "failed",
-      reason: log.status === "sent" ? undefined : readableReason(log.error, "instagram"),
+      status: ["sent", "skipped", "failed"].includes(log.status) ? log.status : "failed",
+      reason: log.status === "sent"
+        ? undefined
+        : readableReason(log.reason ?? log.error, log.platform ?? "instagram"),
       at: log.at
     }));
 

@@ -214,23 +214,28 @@ async function withPanel({
   }
 }
 
-test("LinkedIn queue renders safely and Start has no sender side effects", { concurrency: false }, async () => {
+test("LinkedIn queue claims and starts an executable LinkedIn batch", { concurrency: false }, async () => {
   await withPanel({
     storage: { selectedPlatform: "linkedin" },
-    async testBody({ document, requests, runtimeMessages }) {
+    async testBody({ document, requests, runtimeMessages, setCapabilityHandler }) {
+      setCapabilityHandler(async (message) => ({
+        ok: true,
+        platform: message.platform,
+        executable: true,
+        loggedIn: true,
+      }));
       assert.equal(document.getElementById("platform-select").value, "linkedin");
       assert.equal(document.getElementById("queue-campaign").textContent, 'LinkedIn · Campaign "Consultants" · prepared by Cold DM');
       assert.equal(document.getElementById("start-button").disabled, true);
-      assert.equal(document.getElementById("start-button").textContent, "Sending not available yet");
-      assert.equal(document.getElementById("platform-capability").textContent, "LinkedIn sending is being prepared.");
 
       const recipientName = document.getElementById("recipient-list").children[0].children[1].children[0].textContent;
       assert.equal(recipientName, "Alice Martin");
 
       await document.getElementById("start-button").trigger("click");
       await settle();
-      assert.equal(requests.some(({ url }) => url.includes("/queue/claim") || url.includes("/results")), false);
-      assert.equal(runtimeMessages.some(({ type }) => type === "START_BATCH"), false);
+      assert.equal(requests.some(({ url }) => url.includes("/queue/claim")), true);
+      const start = runtimeMessages.find(({ type }) => type === "START_BATCH");
+      assert.equal(start.payload.rows[0].platform, "linkedin");
     },
   });
 });

@@ -20,6 +20,14 @@ const adapters = createPlatformAdapters({
     url: "https://www.instagram.com",
     name: "sessionid",
   })),
+  sendLinkedInMessage: (item) => sendLinkedInTestMessage({
+    profileUrl: item.recipient.profileUrl,
+    message: item.message,
+  }),
+  getLinkedInSession: async () => Boolean(await chrome.cookies.get({
+    url: "https://www.linkedin.com",
+    name: "li_at",
+  })),
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -1402,11 +1410,13 @@ async function processBatchItem(index) {
     const validationError = adapter.validateItem(row);
     if (validationError) throw new Error(validationError);
     const result = await adapter.send(row);
-    const status = result?.status === "skipped" ? "skipped" : "sent";
+    const status = ["sent", "skipped", "failed"].includes(result?.status)
+      ? result.status
+      : "failed";
     await appendBatchLog({
       ...batchLogFields,
       status,
-      ...(status === "skipped" && result?.reason ? { reason: result.reason } : {}),
+      ...(status !== "sent" && result?.reason ? { reason: result.reason } : {}),
       at: result?.at ?? new Date().toISOString(),
     });
   } catch (error) {

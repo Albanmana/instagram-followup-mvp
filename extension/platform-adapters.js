@@ -26,7 +26,12 @@ function instagramDestinationHandle(item) {
   }
 }
 
-export function createPlatformAdapters({ sendInstagramMessage, getInstagramSession }) {
+export function createPlatformAdapters({
+  sendInstagramMessage,
+  getInstagramSession,
+  sendLinkedInMessage,
+  getLinkedInSession,
+}) {
   return {
     instagram: {
       platform: "instagram",
@@ -51,17 +56,13 @@ export function createPlatformAdapters({ sendInstagramMessage, getInstagramSessi
     },
     linkedin: {
       platform: "linkedin",
-      isLoggedIn: async () => false,
+      isLoggedIn: getLinkedInSession,
       getLoginMessage: () => "Log in to LinkedIn in this browser, then resume.",
-      canExecute: () => ({ ok: false, reason: "LinkedIn sending is being prepared." }),
+      canExecute: () => ({ ok: true }),
       validateItem: (item) => isAllowedProfileUrl(item?.recipient?.profileUrl, "linkedin.com")
         ? null
         : "LinkedIn profile URL is required.",
-      send: async () => ({
-        status: "skipped",
-        reason: "LinkedIn sending is being prepared.",
-        at: new Date().toISOString(),
-      }),
+      send: sendLinkedInMessage,
     },
   };
 }

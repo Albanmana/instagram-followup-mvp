@@ -12,14 +12,23 @@ const linkedInItem = {
   },
 };
 
-test("LinkedIn is recognized but cannot execute in phase 1", async () => {
+test("LinkedIn delegates an already-connected direct message to its sender", async () => {
+  const sentItems = [];
   const adapters = createPlatformAdapters({
     sendInstagramMessage: async () => ({ status: "sent", at: "2026-07-28T10:00:00.000Z" }),
     getInstagramSession: async () => true,
+    sendLinkedInMessage: async (item) => {
+      sentItems.push(item);
+      return { status: "sent", at: "2026-07-28T10:00:00.000Z" };
+    },
+    getLinkedInSession: async () => true,
   });
   const adapter = getPlatformAdapter(adapters, "linkedin");
   assert.equal(adapter.validateItem(linkedInItem), null);
-  assert.deepEqual(adapter.canExecute(), { ok: false, reason: "LinkedIn sending is being prepared." });
+  assert.deepEqual(adapter.canExecute(), { ok: true });
+  assert.equal(await adapter.isLoggedIn(), true);
+  await adapter.send({ ...linkedInItem, message: "Hello Alice" });
+  assert.deepEqual(sentItems, [{ ...linkedInItem, message: "Hello Alice" }]);
 });
 
 test("Instagram sends only when the canonical profile URL and handle identify the same recipient", async () => {
