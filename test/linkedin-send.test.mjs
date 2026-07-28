@@ -9,6 +9,20 @@ import {
   discoverLinkedInComposeHref,
   sendLinkedInComposeMessage,
 } from "../extension/linkedin-send.js";
+import { installLinkedInTestDebugBridge } from "../extension/linkedin-test-debug-bridge.js";
+
+test("installs a direct service-worker debug bridge without runtime messaging", async () => {
+  const target = {};
+  const send = async (payload) => ({ status: "sent", payload });
+
+  installLinkedInTestDebugBridge(target, send);
+
+  assert.equal(typeof target.__coldDmLinkedInTest.send, "function");
+  assert.deepEqual(
+    await target.__coldDmLinkedInTest.send({ message: "Test" }),
+    { status: "sent", payload: { message: "Test" } }
+  );
+});
 
 test("accepts a canonical LinkedIn profile and non-empty message", () => {
   assert.deepEqual(validateLinkedInTestPayload({

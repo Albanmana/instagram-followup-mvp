@@ -1,6 +1,7 @@
 import { createPlatformAdapters, getPlatformAdapter } from "./platform-adapters.js";
 import { validateBatchRows } from "./batch-validation.js";
 import { normalizePersistedQueueItems } from "./platforms.js";
+import { installLinkedInTestDebugBridge } from "./linkedin-test-debug-bridge.js";
 import {
   discoverLinkedInComposeHref,
   sendLinkedInComposeMessage,
@@ -113,6 +114,8 @@ export async function sendLinkedInTestMessage(rawPayload) {
     return outcome;
   }
 }
+
+installLinkedInTestDebugBridge(globalThis, sendLinkedInTestMessage);
 
 async function sendInstagramMessage({ recipient, handle = recipient?.handle, message, has_gif, gif_query }) {
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
