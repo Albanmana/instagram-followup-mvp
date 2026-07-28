@@ -143,6 +143,68 @@ test("claimQueue sends the selected platform", async () => {
   assert.deepEqual(body, { actionIds: ["action-1"], platform: "instagram" });
 });
 
+test("reportResults posts only the strict result fields", async () => {
+  let body;
+  const api = createApiClient({
+    storage: memoryStorage({ coldDmApiKey: "cdm_live_test", coldDmBaseUrl: "https://cold-dm.example" }),
+    baseUrl: "https://cold-dm.example",
+    fetchFn: async (_url, options) => {
+      body = JSON.parse(options.body);
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    },
+  });
+
+  await api.reportResults([{
+    actionId: "00000000-0000-4000-8000-000000000001",
+    handle: "alice",
+    status: "sent",
+    at: "2026-07-28T10:00:00.000Z",
+    platform: "linkedin",
+    messageId: "message-1",
+    recipient: { profileUrl: "https://www.linkedin.com/in/alice/" },
+  }]);
+
+  assert.deepEqual(body, {
+    results: [{
+      actionId: "00000000-0000-4000-8000-000000000001",
+      handle: "alice",
+      status: "sent",
+      at: "2026-07-28T10:00:00.000Z",
+    }],
+  });
+});
+
+test("reportResults retries a result after a failed remote response", async () => {
+  const storage = memoryStorage({
+    coldDmApiKey: "cdm_live_test",
+    coldDmBaseUrl: "https://cold-dm.example",
+  });
+  let attempts = 0;
+  const api = createApiClient({
+    storage,
+    baseUrl: "https://cold-dm.example",
+    fetchFn: async () => {
+      attempts += 1;
+      return new Response(
+        JSON.stringify(attempts === 1 ? { error: "Temporary failure" } : { ok: true }),
+        { status: attempts === 1 ? 503 : 200 },
+      );
+    },
+  });
+  const result = {
+    actionId: "00000000-0000-4000-8000-000000000001",
+    handle: "alice",
+    status: "sent",
+    at: "2026-07-28T10:00:00.000Z",
+  };
+
+  assert.equal((await api.reportResults([result])).ok, false);
+  assert.deepEqual(await api.getHistory(), []);
+  assert.equal((await api.reportResults([result])).ok, true);
+  assert.equal(attempts, 2);
+  assert.deepEqual(await api.getHistory(), [result]);
+});
+
 test("fetchQueue discards invalid and mismatched-platform server rows", async () => {
   const api = createApiClient({
     storage: memoryStorage({ coldDmApiKey: "cdm_live_test", coldDmBaseUrl: "https://cold-dm.example" }),

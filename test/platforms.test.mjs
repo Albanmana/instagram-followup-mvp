@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   normalizePersistedQueueItems,
   normalizeQueueItem,
+  normalizeSenderOutcome,
   platformLabel,
   recipientLabel,
   legacyInstagramProfileUrl,
@@ -103,4 +104,11 @@ test("upgrades only legacy persisted Instagram rows and preserves current queue 
     },
   });
   assert.strictEqual(untouched, current);
+});
+
+test("normalizes the Instagram sender stage sent outcome as sent", () => {
+  assert.equal(
+    normalizeSenderOutcome({ stage: "sent", sentText: "Hello" }).status,
+    "sent",
+  );
 });

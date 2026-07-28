@@ -5,6 +5,7 @@ import {
   platformLabel,
   recipientLabel,
 } from "./platforms.js";
+import { createExtensionResult } from "./result-reporting.js";
 
 const api = createApiClient({ storage: chromeStorageAdapter, baseUrl: "" });
 const $ = (id) => document.getElementById(id);
@@ -498,19 +499,13 @@ async function pollEngine() {
 
 async function reportEngineLogs(batchLogs) {
   const results = batchLogs
-    .map((log) => ({
-      actionId: log.actionId,
-      messageId: log.messageId,
-      leadId: log.leadId,
-      messageType: log.messageType ?? "first_dm",
-      platform: log.platform ?? "instagram",
-      handle: log.recipient?.handle ?? log.handle ?? null,
-      status: ["sent", "skipped", "failed"].includes(log.status) ? log.status : "failed",
+    .map((log) => createExtensionResult({
+      ...log,
       reason: log.status === "sent"
         ? undefined
         : readableReason(log.reason ?? log.error, log.platform ?? "instagram"),
-      at: log.at
-    }));
+    }))
+    .filter(Boolean);
 
   if (results.length > 0) await api.reportResults(results);
 }

@@ -47,6 +47,15 @@ export function normalizePersistedQueueItems(items) {
   });
 }
 
+export function normalizeSenderOutcome(result) {
+  const status = ["sent", "skipped", "failed"].includes(result?.status)
+    ? result.status
+    : result?.stage === "sent"
+      ? "sent"
+      : "failed";
+  return { ...result, status };
+}
+
 export function recipientLabel(item) {
   if (item.platform === "linkedin") return item.recipient.displayName || item.recipient.handle || item.recipient.profileUrl;
   return item.recipient.handle ? `@${item.recipient.handle.replace(/^@+/, "")}` : item.recipient.displayName || item.recipient.profileUrl;

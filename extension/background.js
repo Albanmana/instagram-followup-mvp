@@ -1,6 +1,6 @@
 import { createPlatformAdapters, getPlatformAdapter } from "./platform-adapters.js";
 import { validateBatchRows } from "./batch-validation.js";
-import { normalizePersistedQueueItems } from "./platforms.js";
+import { normalizePersistedQueueItems, normalizeSenderOutcome } from "./platforms.js";
 import { installLinkedInTestDebugBridge } from "./linkedin-test-debug-bridge.js";
 import {
   discoverLinkedInComposeHref,
@@ -98,7 +98,7 @@ export async function sendLinkedInTestMessage(rawPayload) {
     const [sendExecution] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: sendLinkedInComposeMessage,
-      args: [payload.profileUrl, payload.message],
+      args: [payload.profileUrl, discovery.recipientId, payload.message],
     });
     if (sendExecution?.error) {
       throw new Error(`LinkedIn compose send failed: ${sendExecution.error.message ?? "unknown scripting error"}`);
@@ -1409,10 +1409,8 @@ async function processBatchItem(index) {
     if (!adapter) throw new Error("Unsupported platform.");
     const validationError = adapter.validateItem(row);
     if (validationError) throw new Error(validationError);
-    const result = await adapter.send(row);
-    const status = ["sent", "skipped", "failed"].includes(result?.status)
-      ? result.status
-      : "failed";
+    const result = normalizeSenderOutcome(await adapter.send(row));
+    const status = result.status;
     await appendBatchLog({
       ...batchLogFields,
       status,

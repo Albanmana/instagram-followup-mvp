@@ -7,6 +7,18 @@ const RESULTS_KEY = "reportedResults";
 const MAX_STORED_RESULTS = 1000;
 export const DEFAULT_COLD_DM_APP_URL = "https://cold-dm-app-phi.vercel.app";
 
+function strictRemoteResult(result) {
+  return {
+    actionId: result.actionId,
+    handle: String(result.handle ?? "").trim(),
+    status: result.status,
+    ...(typeof result.reason === "string" && result.reason
+      ? { reason: result.reason }
+      : {}),
+    at: result.at,
+  };
+}
+
 export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, now = () => new Date() }) {
   const mockMode = baseUrl === undefined;
   const defaultBaseUrl = DEFAULT_COLD_DM_APP_URL;
@@ -104,13 +116,18 @@ export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, 
 
   async function reportResults(results) {
     const stored = await getStoredResults();
-    const fresh = results.filter((result) => !stored.some((item) => item.actionId === result.actionId && item.at === result.at));
-    if (fresh.length > 0) await storage.set({ [RESULTS_KEY]: [...stored, ...fresh].slice(-MAX_STORED_RESULTS) });
-    if (mockMode) return { ok: true, added: fresh.length };
+    const reportable = mockMode ? results : results.map(strictRemoteResult);
+    const fresh = reportable.filter((result) => !stored.some((item) => item.actionId === result.actionId && item.at === result.at));
+    if (mockMode) {
+      if (fresh.length > 0) {
+        await storage.set({ [RESULTS_KEY]: [...stored, ...fresh].slice(-MAX_STORED_RESULTS) });
+      }
+      return { ok: true, added: fresh.length };
+    }
     if (fresh.length === 0) return { ok: true, added: 0 };
     try {
       const response = await request("/api/ext/v1/results", { method: "POST", body: JSON.stringify({ results: fresh }) });
-      await storage.set({ [RESULTS_KEY]: stored.filter((item) => !fresh.some((result) => result.actionId === item.actionId && result.at === item.at)) });
+      await storage.set({ [RESULTS_KEY]: [...stored, ...fresh].slice(-MAX_STORED_RESULTS) });
       return { ...response, added: fresh.length };
     } catch (error) {
       return { ok: false, added: fresh.length, error: error instanceof Error ? error.message : "Could not report results" };

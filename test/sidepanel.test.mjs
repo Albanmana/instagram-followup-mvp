@@ -571,7 +571,7 @@ test("Start does not claim stale rows replaced by a same-platform refresh", { co
   });
 });
 
-test("Instagram result reporting keeps platform and handle but omits nested recipient", { concurrency: false }, async () => {
+test("Instagram result reporting emits only the strict Cold DM result contract", { concurrency: false }, async () => {
   const row = {
     actionId: "action-1",
     messageId: "message-1",
@@ -603,9 +603,12 @@ test("Instagram result reporting keeps platform and handle but omits nested reci
       const resultRequest = requests.find(({ url }) => url.includes("/results"));
       assert.ok(resultRequest);
       const result = JSON.parse(resultRequest.options.body).results[0];
-      assert.equal(result.platform, "instagram");
-      assert.equal(result.handle, "alice");
-      assert.equal("recipient" in result, false);
+      assert.deepEqual(result, {
+        actionId: "action-1",
+        handle: "alice",
+        status: "sent",
+        at: "2026-07-28T10:00:00.000Z",
+      });
     },
   });
 });

@@ -46,6 +46,35 @@ export function discoverLinkedInComposeHref(expectedProfileUrl) {
       return null;
     }
   };
+  const elementText = (element) =>
+    String(
+      element?.innerText
+      || element?.textContent
+      || element?.getAttribute?.("aria-label")
+      || ""
+    )
+      .replace(/\s+/g, " ")
+      .trim();
+  const isVisible = (element) => {
+    if (!element || element.hidden || element.getAttribute?.("aria-hidden") === "true") return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden";
+  };
+  const composeRecipient = (href) => {
+    try {
+      const url = new URL(href, "https://www.linkedin.com");
+      if (
+        url.protocol !== "https:"
+        || url.hostname.replace(/^www\./, "") !== "linkedin.com"
+        || url.pathname !== "/messaging/compose/"
+      ) {
+        return null;
+      }
+      return url.searchParams.get("recipient")?.trim() || null;
+    } catch {
+      return null;
+    }
+  };
 
   const expectedIdentity = profileIdentity(expectedProfileUrl);
   if (!expectedIdentity) {
@@ -56,18 +85,45 @@ export function discoverLinkedInComposeHref(expectedProfileUrl) {
     return { status: "skipped", reason: "The current page does not match the expected LinkedIn profile." };
   }
 
-  const messageLink = [...document.querySelectorAll("a")].find((anchor) =>
-    anchor.textContent?.trim() === "Message" &&
-    anchor.getAttribute("href")?.startsWith("/messaging/compose/")
-  );
-  const composeHref = messageLink?.getAttribute("href");
+  const main = document.querySelector("main");
+  const profileHeading = main?.querySelector?.("h1");
+  if (!main || !profileHeading || !isVisible(profileHeading)) {
+    return { status: "skipped", reason: "The visible target LinkedIn profile actions could not be identified." };
+  }
+  const profileActions = profileHeading.closest?.("section");
+  if (!profileActions || (main.contains && !main.contains(profileActions))) {
+    return { status: "skipped", reason: "The visible target LinkedIn profile actions could not be identified." };
+  }
 
-  return composeHref
-    ? { status: "ready", composeHref }
-    : { status: "skipped", reason: "LinkedIn Message action is unavailable for this profile." };
+  const observed = [...(profileActions.querySelectorAll?.("[aria-label], a, button, span") ?? [])]
+    .filter(isVisible);
+  const labels = observed.map(elementText);
+  if (labels.some((label) => /\b(?:inmail|open profile)\b/i.test(label))) {
+    return { status: "skipped", reason: "LinkedIn does not prove a direct connection for this message path." };
+  }
+  const isDirectConnection = labels.some((label) =>
+    /^(?:1st|1st degree connection)$/i.test(label)
+    || /\b1st degree connection\b/i.test(label)
+  );
+  if (!isDirectConnection) {
+    return { status: "skipped", reason: "LinkedIn does not prove a direct connection for this profile." };
+  }
+
+  const composeLinks = observed
+    .filter((element) => elementText(element) === "Message")
+    .map((element) => ({
+      composeHref: element.getAttribute?.("href"),
+      recipientId: composeRecipient(element.getAttribute?.("href")),
+    }))
+    .filter(({ composeHref, recipientId }) => composeHref && recipientId);
+  if (composeLinks.length !== 1) {
+    return { status: "skipped", reason: "A single direct Message action is unavailable for this profile." };
+  }
+
+  return { status: "ready", ...composeLinks[0] };
 }
 
-export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
+export async function sendLinkedInComposeMessage(expectedProfileUrl, expectedRecipientId, message) {
   const profileIdentity = (value) => {
     try {
       return new URL(value, "https://www.linkedin.com").pathname.replace(/\/$/, "").toLowerCase();
@@ -91,11 +147,19 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
     const style = getComputedStyle(element);
     return style.display !== "none" && style.visibility !== "hidden";
   };
-  const activeConversationRoot = (composer, recipient) => {
-    for (let candidate = composer; candidate; candidate = candidate.parentElement) {
-      if (candidate !== document.body && candidate.contains?.(recipient)) return candidate;
+  const visibleElements = (root, selector) =>
+    [...(root?.querySelectorAll?.(selector) ?? [])].filter(isVisible);
+  const activeConversation = (recipient) => {
+    for (let candidate = recipient?.parentElement; candidate && candidate !== document.body; candidate = candidate.parentElement) {
+      const composers = visibleElements(
+        candidate,
+        '[contenteditable="true"][role="textbox"][aria-label="Write a message…"]'
+      );
+      if (composers.length === 1) {
+        return { root: candidate, composer: composers[0] };
+      }
     }
-    return composer.parentElement ?? composer;
+    return null;
   };
   const visibleMatchingElements = (root, text) => {
     const matches = [];
@@ -117,11 +181,16 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
   const recipientId = composeUrl.pathname === "/messaging/compose/"
     ? composeUrl.searchParams.get("recipient")
     : null;
-  const recipientChip = await waitFor(() => {
-    const chip = document.querySelector('button[aria-label^="Remove "]');
-    return recipientId && isVisible(chip) ? chip : null;
+  if (!expectedRecipientId || recipientId !== expectedRecipientId) {
+    return { status: "skipped", reason: "The compose recipient does not match the expected LinkedIn profile." };
+  }
+
+  const conversation = await waitFor(() => {
+    const recipientChips = visibleElements(document, 'button[aria-label^="Remove "]');
+    if (recipientChips.length !== 1) return null;
+    return activeConversation(recipientChips[0]);
   });
-  if (!recipientChip) {
+  if (!conversation) {
     return { status: "skipped", reason: "The compose recipient does not match the expected LinkedIn profile." };
   }
 
@@ -130,31 +199,32 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
     return { status: "skipped", reason: "A LinkedIn test message is required." };
   }
 
-  const composer = document.querySelector('[contenteditable="true"][role="textbox"][aria-label="Write a message…"]');
-  if (!composer) {
-    return { status: "skipped", reason: "LinkedIn message composer is unavailable." };
-  }
-  const conversationRoot = activeConversationRoot(composer, recipientChip);
+  const { root: conversationRoot, composer } = conversation;
   const visibleMessageCountBeforeSend = visibleMatchingElements(conversationRoot, textToSend).length;
 
   composer.focus();
   const selection = getSelection();
   const range = document.createRange();
   range.selectNodeContents(composer);
-  range.collapse(false);
   selection?.removeAllRanges();
   selection?.addRange(range);
 
   const inserted = document.execCommand("insertText", false, textToSend);
-  if (!inserted || elementText(composer) !== textToSend) {
+  if (inserted) {
     composer.dispatchEvent(new InputEvent("input", {
       bubbles: true,
       inputType: "insertText",
       data: textToSend,
     }));
   }
+  if (!inserted || elementText(composer) !== textToSend) {
+    return { status: "failed", reason: "LinkedIn could not establish the exact queued message in the composer." };
+  }
 
-  const sendButton = await waitFor(() => document.querySelector('button[type="submit"]:not([disabled])'));
+  const sendButton = await waitFor(() => {
+    const candidates = visibleElements(conversationRoot, 'button[type="submit"]:not([disabled])');
+    return candidates.length === 1 ? candidates[0] : null;
+  });
   if (!sendButton) {
     return { status: "skipped", reason: "LinkedIn Send action is unavailable." };
   }

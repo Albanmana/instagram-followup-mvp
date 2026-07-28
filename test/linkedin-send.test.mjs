@@ -95,32 +95,160 @@ test("classifies unavailable direct messaging as skipped with an ISO timestamp",
 
 test("discovers only the observed Message compose link on the expected profile", () => {
   const originalDocument = globalThis.document;
-  globalThis.document = {
-    location: { href: "https://www.linkedin.com/in/alice/?trk=feed" },
-    querySelectorAll(selector) {
-      assert.equal(selector, "a");
-      return [
-        {
-          textContent: "Connect",
-          getAttribute: () => "/messaging/compose/?recipient=other",
-        },
-        {
-          textContent: "Message",
-          getAttribute: (attribute) => attribute === "href"
-            ? "/messaging/compose/?recipient=alice"
-            : null,
-        },
-      ];
+  const heading = {
+    textContent: "Alice Martin",
+    hidden: false,
+    getAttribute: () => null,
+  };
+  const directEvidence = {
+    textContent: "1st",
+    hidden: false,
+    getAttribute: () => null,
+  };
+  const messageLink = {
+    textContent: "Message",
+    hidden: false,
+    getAttribute: (attribute) => attribute === "href"
+      ? "/messaging/compose/?recipient=alice-id"
+      : null,
+  };
+  const profileActions = {
+    hidden: false,
+    querySelector(selector) {
+      return selector === "h1" ? heading : null;
+    },
+    querySelectorAll() {
+      return [directEvidence, messageLink];
     },
   };
+  heading.closest = () => profileActions;
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/alice/?trk=feed" },
+    querySelector(selector) {
+      assert.equal(selector, "main");
+      return profileActions;
+    },
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
 
   try {
     assert.deepEqual(
       discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/"),
-      { status: "ready", composeHref: "/messaging/compose/?recipient=alice" }
+      {
+        status: "ready",
+        composeHref: "/messaging/compose/?recipient=alice-id",
+        recipientId: "alice-id",
+      }
     );
   } finally {
     globalThis.document = originalDocument;
+    delete globalThis.getComputedStyle;
+  }
+});
+
+test("skips a global Message link that is outside the visible target profile actions", () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const heading = { textContent: "Alice", hidden: false, getAttribute: () => null };
+  const profileActions = {
+    querySelector: (selector) => selector === "h1" ? heading : null,
+    querySelectorAll: () => [{
+      textContent: "1st",
+      hidden: false,
+      getAttribute: () => null,
+    }],
+  };
+  heading.closest = () => profileActions;
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/alice/" },
+    querySelector: (selector) => selector === "main" ? profileActions : null,
+    querySelectorAll: () => [{
+      textContent: "Message",
+      getAttribute: () => "/messaging/compose/?recipient=unrelated",
+    }],
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    const outcome = discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
+    assert.equal(outcome.status, "skipped");
+    assert.match(outcome.reason, /direct Message action/i);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("skips clear InMail or Open Profile message paths", () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const makeProfileActions = (blockedLabel) => {
+    const heading = { textContent: "Alice", hidden: false, getAttribute: () => null };
+    const profileActions = {
+      querySelector: (selector) => selector === "h1" ? heading : null,
+      querySelectorAll: () => [
+      { textContent: "1st", hidden: false, getAttribute: () => null },
+      { textContent: blockedLabel, hidden: false, getAttribute: () => null },
+      {
+        textContent: "Message",
+        hidden: false,
+        getAttribute: (attribute) => attribute === "href"
+          ? "/messaging/compose/?recipient=alice-id"
+          : null,
+      },
+    ],
+    };
+    heading.closest = () => profileActions;
+    return profileActions;
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    for (const blockedLabel of ["InMail", "Open Profile"]) {
+      globalThis.document = {
+        location: { href: "https://www.linkedin.com/in/alice/" },
+        querySelector: (selector) => selector === "main"
+          ? makeProfileActions(blockedLabel)
+          : null,
+      };
+      const outcome = discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
+      assert.equal(outcome.status, "skipped");
+      assert.match(outcome.reason, /direct connection/i);
+    }
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("skips when the visible profile cannot prove a first-degree connection", () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const heading = { textContent: "Alice", hidden: false, getAttribute: () => null };
+  const profileActions = {
+    querySelector: (selector) => selector === "h1" ? heading : null,
+    querySelectorAll: () => [{
+      textContent: "Message",
+      hidden: false,
+      getAttribute: (attribute) => attribute === "href"
+        ? "/messaging/compose/?recipient=alice-id"
+        : null,
+    }],
+  };
+  heading.closest = () => profileActions;
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/alice/" },
+    querySelector: (selector) => selector === "main" ? profileActions : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    const outcome = discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
+    assert.equal(outcome.status, "skipped");
+    assert.match(outcome.reason, /direct connection/i);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
   }
 });
 
@@ -135,9 +263,9 @@ test("skips compose sending when the compose recipient chip is unavailable", asy
   };
   globalThis.document = {
     location: { href: "https://www.linkedin.com/messaging/compose/?recipient=alice" },
-    querySelector(selector) {
+    querySelectorAll(selector) {
       if (selector === 'button[aria-label^="Remove "]') {
-        return null;
+        return [];
       }
       throw new Error(`Unexpected selector: ${selector}`);
     },
@@ -147,6 +275,7 @@ test("skips compose sending when the compose recipient chip is unavailable", asy
   try {
     const outcome = await sendLinkedInComposeMessage(
       "https://www.linkedin.com/in/alice/",
+      "alice",
       "Hello Alice"
     );
     assert.equal(outcome.status, "skipped");
@@ -182,7 +311,13 @@ function createElement({ text = "", href = null, parent = null, children = [], h
   return element;
 }
 
-function withComposeDom({ recipientHidden = false, recipientAvailableAfterChecks = 0, onSend = () => {} }, run) {
+function withComposeDom({
+  recipientHidden = false,
+  recipientAvailableAfterChecks = 0,
+  composerText = "",
+  preserveDraftOnInsert = false,
+  onSend = () => {},
+}, run) {
   const original = {
     document: globalThis.document,
     getComputedStyle: globalThis.getComputedStyle,
@@ -191,9 +326,16 @@ function withComposeDom({ recipientHidden = false, recipientAvailableAfterChecks
   };
   const oldMessage = createElement({ text: "Hello Alice" });
   const recipient = createElement({ text: "Alice", hidden: recipientHidden });
-  const composer = createElement();
-  const context = createElement({ children: [recipient, oldMessage, composer] });
+  const composer = createElement({ text: composerText });
   const sendButton = createElement();
+  const context = createElement({ children: [recipient, oldMessage, composer, sendButton] });
+  context.querySelectorAll = (selector) => {
+    if (selector === '[contenteditable="true"][role="textbox"][aria-label="Write a message…"]') {
+      return [composer];
+    }
+    if (selector === 'button[type="submit"]:not([disabled])') return [sendButton];
+    return [];
+  };
   let recipientChecks = 0;
   sendButton.click = () => {
     sendButton.clicked = true;
@@ -204,22 +346,30 @@ function withComposeDom({ recipientHidden = false, recipientAvailableAfterChecks
 
   globalThis.document = {
     location: { href: "https://www.linkedin.com/messaging/compose/?recipient=alice" },
-    querySelector(selector) {
+    body: createElement(),
+    querySelectorAll(selector) {
       if (selector === 'button[aria-label^="Remove "]') {
         recipientChecks += 1;
-        return recipientChecks > recipientAvailableAfterChecks ? recipient : null;
+        return recipientChecks > recipientAvailableAfterChecks ? [recipient] : [];
       }
-      if (selector === '[contenteditable="true"][role="textbox"][aria-label="Write a message…"]') return composer;
-      if (selector === 'button[type="submit"]:not([disabled])') return sendButton;
       throw new Error(`Unexpected selector: ${selector}`);
     },
     createRange() {
-      return { selectNodeContents() {}, collapse() {} };
+      return {
+        selectedContents: false,
+        selectNodeContents() {
+          this.selectedContents = true;
+        },
+        collapse() {
+          this.selectedContents = false;
+        },
+      };
     },
     execCommand(command, _showUi, value) {
       assert.equal(command, "insertText");
-      composer.textContent = value;
-      composer.innerText = value;
+      const nextValue = preserveDraftOnInsert ? `${composer.innerText}${value}` : value;
+      composer.textContent = nextValue;
+      composer.innerText = nextValue;
       return true;
     },
   };
@@ -240,6 +390,7 @@ test("confirms a newly rendered matching message in the active compose context",
   }, async ({ sendButton }) => {
     const outcome = await sendLinkedInComposeMessage(
       "https://www.linkedin.com/in/alice/",
+      "alice",
       "Hello Alice"
     );
     assert.deepEqual(outcome, { status: "sent", sentText: "Hello Alice" });
@@ -256,6 +407,7 @@ test("waits for the LinkedIn recipient chip before deciding the compose recipien
   }, async () => {
     const outcome = await sendLinkedInComposeMessage(
       "https://www.linkedin.com/in/alice/",
+      "alice",
       "Hello Alice"
     );
     assert.equal(outcome.status, "sent");
@@ -274,6 +426,7 @@ test("fails deterministically when only an old matching message is visible after
     await withComposeDom({}, async () => {
       const outcome = await sendLinkedInComposeMessage(
         "https://www.linkedin.com/in/alice/",
+        "alice",
         "Hello Alice"
       );
       assert.equal(outcome.status, "failed");
@@ -304,6 +457,7 @@ test("fails when React replaces an old matching message without adding one", asy
     }, async () => {
       const outcome = await sendLinkedInComposeMessage(
         "https://www.linkedin.com/in/alice/",
+        "alice",
         "Hello Alice"
       );
       assert.equal(outcome.status, "failed");
@@ -315,12 +469,98 @@ test("fails when React replaces an old matching message without adding one", asy
 });
 
 test("skips compose sending when the expected recipient link is hidden", async () => {
-  await withComposeDom({ recipientHidden: true }, async () => {
+  const originalDateNow = Date.now;
+  let now = 0;
+  Date.now = () => {
+    now += 9_000;
+    return now;
+  };
+  try {
+    await withComposeDom({ recipientHidden: true }, async () => {
+      const outcome = await sendLinkedInComposeMessage(
+        "https://www.linkedin.com/in/alice/",
+        "alice",
+        "Hello Alice"
+      );
+      assert.equal(outcome.status, "skipped");
+      assert.match(outcome.reason, /recipient/i);
+    });
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
+test("replaces a restored LinkedIn draft before sending the queued text", async () => {
+  await withComposeDom({
+    composerText: "Restored draft",
+    onSend({ context }) {
+      context.children.push(createElement({ text: "Hello Alice", parent: context }));
+    },
+  }, async ({ composer, sendButton }) => {
     const outcome = await sendLinkedInComposeMessage(
       "https://www.linkedin.com/in/alice/",
+      "alice",
+      "Hello Alice"
+    );
+    assert.equal(outcome.status, "sent");
+    assert.equal(composer.innerText, "");
+    assert.equal(sendButton.clicked, true);
+  });
+});
+
+test("does not send when the exact queued text cannot replace a restored draft", async () => {
+  await withComposeDom({
+    composerText: "Restored draft",
+    preserveDraftOnInsert: true,
+  }, async ({ sendButton }) => {
+    const outcome = await sendLinkedInComposeMessage(
+      "https://www.linkedin.com/in/alice/",
+      "alice",
+      "Hello Alice"
+    );
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /exact queued message/i);
+    assert.equal(sendButton.clicked, false);
+  });
+});
+
+test("skips when the compose route is not bound to the discovered recipient", async () => {
+  const originalDocument = globalThis.document;
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/messaging/compose/?recipient=other" },
+  };
+
+  try {
+    const outcome = await sendLinkedInComposeMessage(
+      "https://www.linkedin.com/in/alice/",
+      "alice",
       "Hello Alice"
     );
     assert.equal(outcome.status, "skipped");
     assert.match(outcome.reason, /recipient/i);
+  } finally {
+    globalThis.document = originalDocument;
+  }
+});
+
+test("uses only the send action scoped to the bound compose conversation", async () => {
+  await withComposeDom({
+    onSend({ context }) {
+      context.children.push(createElement({ text: "Hello Alice", parent: context }));
+    },
+  }, async ({ sendButton }) => {
+    const unrelatedSendButton = createElement();
+    unrelatedSendButton.click = () => {
+      throw new Error("Clicked unrelated global send action");
+    };
+    globalThis.document.querySelector = () => unrelatedSendButton;
+
+    const outcome = await sendLinkedInComposeMessage(
+      "https://www.linkedin.com/in/alice/",
+      "alice",
+      "Hello Alice"
+    );
+    assert.equal(outcome.status, "sent");
+    assert.equal(sendButton.clicked, true);
   });
 });
