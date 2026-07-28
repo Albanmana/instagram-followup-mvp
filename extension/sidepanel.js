@@ -1,4 +1,4 @@
-import { createApiClient, chromeStorageAdapter } from "./api-client.js";
+import { createApiClient, chromeStorageAdapter, DEFAULT_COLD_DM_APP_URL } from "./api-client.js";
 import {
   isPlatform,
   normalizePersistedQueueItems,
@@ -50,7 +50,7 @@ async function getSettings() {
   const {
     coldDmApiKey = "",
     coldDmAccount = "",
-    coldDmBaseUrl = "",
+    coldDmBaseUrl = DEFAULT_COLD_DM_APP_URL,
     sendDelaySeconds = DEFAULT_DELAY_SECONDS,
     queuePollingHours = DEFAULT_QUEUE_POLLING_HOURS,
     selectedPlatform: storedPlatform

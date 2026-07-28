@@ -235,6 +235,16 @@ test("LinkedIn queue renders safely and Start has no sender side effects", { con
   });
 });
 
+test("settings visibly prefill the deployed Cold DM App URL", { concurrency: false }, async () => {
+  await withPanel({
+    storage: { coldDmBaseUrl: undefined },
+    async testBody({ document }) {
+      await document.getElementById("settings-button").trigger("click");
+      assert.equal(document.getElementById("settings-base-url").value, "https://cold-dm-app-phi.vercel.app");
+    },
+  });
+});
+
 test("a deferred queue refresh cannot overwrite a newly active run", { concurrency: false }, async () => {
   const pendingQueue = deferred();
   const queueFetchStarted = deferred();

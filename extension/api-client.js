@@ -5,10 +5,11 @@ import { isPlatform, normalizeQueueItem } from "./platforms.js";
 
 const RESULTS_KEY = "reportedResults";
 const MAX_STORED_RESULTS = 1000;
+export const DEFAULT_COLD_DM_APP_URL = "https://cold-dm-app-phi.vercel.app";
 
 export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, now = () => new Date() }) {
   const mockMode = baseUrl === undefined;
-  const defaultBaseUrl = "https://cold-dm-app-phi.vercel.app";
+  const defaultBaseUrl = DEFAULT_COLD_DM_APP_URL;
 
   function getMockQueue(platform) {
     const rawItem = {
