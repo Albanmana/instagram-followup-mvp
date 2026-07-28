@@ -101,9 +101,18 @@ async function settle() {
   }
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 async function withPanel({
   storage = {},
   batchStatus = { ok: true, batchStatus: "stopped", batchLogs: [] },
+  queueFetch,
   testBody,
 }) {
   const original = {
@@ -172,6 +181,7 @@ async function withPanel({
     if (String(url).includes("/results")) {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }
+    if (queueFetch) return queueFetch(String(url), options);
     const platform = new URL(String(url)).searchParams.get("platform");
     return new Response(JSON.stringify(queueResponse(platform)), { status: 200 });
   };
@@ -212,6 +222,43 @@ test("LinkedIn queue renders safely and Start has no sender side effects", { con
       await settle();
       assert.equal(requests.some(({ url }) => url.includes("/queue/claim") || url.includes("/results")), false);
       assert.equal(runtimeMessages.some(({ type }) => type === "START_BATCH"), false);
+    },
+  });
+});
+
+test("a deferred queue refresh cannot overwrite a newly active run", { concurrency: false }, async () => {
+  const pendingQueue = deferred();
+  const row = {
+    actionId: "action-1",
+    messageId: "message-1",
+    leadId: "lead-1",
+    platform: "instagram",
+    recipient: {
+      displayName: "Alice",
+      handle: "alice",
+      profileUrl: "https://www.instagram.com/alice/",
+    },
+    message: "Hello",
+    messageType: "first_dm",
+  };
+
+  await withPanel({
+    queueFetch: () => pendingQueue.promise,
+    async testBody({ document, setBatchStatus }) {
+      setBatchStatus({
+        ok: true,
+        batchStatus: "running",
+        batchQueue: [row],
+        batchIndex: 0,
+        batchLogs: [],
+        batchDelay: 400,
+      });
+      pendingQueue.resolve(new Response(JSON.stringify(queueResponse("instagram")), { status: 200 }));
+      await settle();
+
+      assert.equal(document.getElementById("run-card").hidden, false);
+      assert.equal(document.getElementById("queue-card").hidden, true);
+      assert.equal(document.getElementById("platform-select").disabled, true);
     },
   });
 });

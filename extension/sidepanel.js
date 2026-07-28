@@ -285,17 +285,20 @@ function showIdleQueue(queue, capability) {
   );
 }
 
+async function showRunningEngine(engine) {
+  if (!engine?.ok || engine.batchStatus !== "running") return false;
+  clearQueuePolling();
+  const runningPlatform = engine.batchQueue?.[0]?.platform;
+  await applySelectedPlatform(runningPlatform);
+  state.capability = await getPlatformCapability(selectedPlatform());
+  setPlatformControlsDisabled(true);
+  renderRun(engine);
+  return true;
+}
+
 async function refreshToday({ automatic = false } = {}) {
   const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
-  if (engine?.ok && engine.batchStatus === "running") {
-    clearQueuePolling();
-    const runningPlatform = engine.batchQueue?.[0]?.platform;
-    await applySelectedPlatform(runningPlatform);
-    state.capability = await getPlatformCapability(selectedPlatform());
-    setPlatformControlsDisabled(true);
-    renderRun(engine);
-    return;
-  }
+  if (await showRunningEngine(engine)) return;
 
   const { pausedItems } = await chrome.storage.local.get("pausedItems");
   if (Array.isArray(pausedItems) && pausedItems.length > 0) {
@@ -327,6 +330,8 @@ async function refreshToday({ automatic = false } = {}) {
     const capability = await getPlatformCapability(platform);
     if (!capability?.ok) throw new Error(capability?.error ?? "Could not check platform availability");
     if (platform !== selectedPlatform()) return;
+    const latestEngine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
+    if (await showRunningEngine(latestEngine)) return;
     state.queue = queue;
     showIdleQueue(state.queue, capability);
     setQueueSyncStatus(`Updated ${new Date().toLocaleTimeString()}`);
