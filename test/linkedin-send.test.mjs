@@ -102,6 +102,7 @@ test("discovers only the observed Message compose link on the expected profile",
 
 test("skips compose sending when the visible recipient is not the expected profile", async () => {
   const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
   globalThis.document = {
     querySelector(selector) {
       if (selector === 'a[href*="/in/"]') {
@@ -110,6 +111,7 @@ test("skips compose sending when the visible recipient is not the expected profi
       throw new Error(`Unexpected selector: ${selector}`);
     },
   };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
 
   try {
     const outcome = await sendLinkedInComposeMessage(
@@ -120,5 +122,123 @@ test("skips compose sending when the visible recipient is not the expected profi
     assert.match(outcome.reason, /recipient/i);
   } finally {
     globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
   }
+});
+
+function createElement({ text = "", href = null, parent = null, children = [], hidden = false } = {}) {
+  const element = {
+    textContent: text,
+    innerText: text,
+    parentElement: parent,
+    children,
+    hidden,
+    focused: false,
+    clicked: false,
+    getAttribute(attribute) {
+      return attribute === "href" ? href : null;
+    },
+    focus() {
+      this.focused = true;
+    },
+    dispatchEvent() {},
+    contains(candidate) {
+      return candidate === this || this.children.some((child) => child.contains(candidate));
+    },
+  };
+  children.forEach((child) => { child.parentElement = element; });
+  return element;
+}
+
+function withComposeDom({ recipientHidden = false, onSend = () => {} }, run) {
+  const original = {
+    document: globalThis.document,
+    getComputedStyle: globalThis.getComputedStyle,
+    getSelection: globalThis.getSelection,
+    InputEvent: globalThis.InputEvent,
+  };
+  const oldMessage = createElement({ text: "Hello Alice" });
+  const recipient = createElement({ href: "/in/alice/", hidden: recipientHidden });
+  const composer = createElement();
+  const context = createElement({ children: [recipient, oldMessage, composer] });
+  const sendButton = createElement();
+  sendButton.click = () => {
+    sendButton.clicked = true;
+    composer.textContent = "";
+    composer.innerText = "";
+    onSend({ context, composer });
+  };
+
+  globalThis.document = {
+    querySelector(selector) {
+      if (selector === 'a[href*="/in/"]') return recipient;
+      if (selector === '[contenteditable="true"][role="textbox"][aria-label="Write a message…"]') return composer;
+      if (selector === 'button[type="submit"]:not([disabled])') return sendButton;
+      throw new Error(`Unexpected selector: ${selector}`);
+    },
+    createRange() {
+      return { selectNodeContents() {}, collapse() {} };
+    },
+    execCommand(command, _showUi, value) {
+      assert.equal(command, "insertText");
+      composer.textContent = value;
+      composer.innerText = value;
+      return true;
+    },
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+  globalThis.getSelection = () => ({ removeAllRanges() {}, addRange() {} });
+  globalThis.InputEvent = class InputEvent {};
+
+  return Promise.resolve(run({ context, composer, oldMessage, sendButton })).finally(() => {
+    Object.assign(globalThis, original);
+  });
+}
+
+test("confirms a newly rendered matching message in the active compose context", async () => {
+  await withComposeDom({
+    onSend({ context }) {
+      context.children.push(createElement({ text: "Hello Alice", parent: context }));
+    },
+  }, async ({ sendButton }) => {
+    const outcome = await sendLinkedInComposeMessage(
+      "https://www.linkedin.com/in/alice/",
+      "Hello Alice"
+    );
+    assert.deepEqual(outcome, { status: "sent", sentText: "Hello Alice" });
+    assert.equal(sendButton.clicked, true);
+  });
+});
+
+test("fails deterministically when only an old matching message is visible after send", async () => {
+  const originalDateNow = Date.now;
+  let now = 0;
+  Date.now = () => {
+    now += 9_000;
+    return now;
+  };
+
+  try {
+    await withComposeDom({}, async () => {
+      const outcome = await sendLinkedInComposeMessage(
+        "https://www.linkedin.com/in/alice/",
+        "Hello Alice"
+      );
+      assert.equal(outcome.status, "failed");
+      assert.match(outcome.reason, /did not confirm/i);
+    });
+  } finally {
+    Date.now = originalDateNow;
+  }
+});
+
+test("skips compose sending when the expected recipient link is hidden", async () => {
+  await withComposeDom({ recipientHidden: true }, async () => {
+    const outcome = await sendLinkedInComposeMessage(
+      "https://www.linkedin.com/in/alice/",
+      "Hello Alice"
+    );
+    assert.equal(outcome.status, "skipped");
+    assert.match(outcome.reason, /recipient/i);
+  });
 });

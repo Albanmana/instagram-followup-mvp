@@ -91,6 +91,22 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
     const style = getComputedStyle(element);
     return style.display !== "none" && style.visibility !== "hidden";
   };
+  const activeConversationRoot = (composer, recipient) => {
+    for (let candidate = composer; candidate; candidate = candidate.parentElement) {
+      if (candidate !== document.body && candidate.contains?.(recipient)) return candidate;
+    }
+    return composer.parentElement ?? composer;
+  };
+  const visibleMatchingElements = (root, text) => {
+    const matches = [];
+    const visit = (element) => {
+      if (!element) return;
+      if (element !== root && isVisible(element) && elementText(element) === text) matches.push(element);
+      for (const child of element.children ?? []) visit(child);
+    };
+    visit(root);
+    return matches;
+  };
 
   const expectedIdentity = profileIdentity(expectedProfileUrl);
   if (!expectedIdentity) {
@@ -98,7 +114,7 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
   }
 
   const visibleProfile = document.querySelector('a[href*="/in/"]');
-  if (!visibleProfile || profileIdentity(visibleProfile.getAttribute("href")) !== expectedIdentity) {
+  if (!isVisible(visibleProfile) || profileIdentity(visibleProfile.getAttribute("href")) !== expectedIdentity) {
     return { status: "skipped", reason: "The compose recipient does not match the expected LinkedIn profile." };
   }
 
@@ -111,6 +127,8 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
   if (!composer) {
     return { status: "skipped", reason: "LinkedIn message composer is unavailable." };
   }
+  const conversationRoot = activeConversationRoot(composer, visibleProfile);
+  const visibleMessagesBeforeSend = new Set(visibleMatchingElements(conversationRoot, textToSend));
 
   composer.focus();
   const selection = getSelection();
@@ -137,8 +155,8 @@ export async function sendLinkedInComposeMessage(expectedProfileUrl, message) {
   sendButton.click();
   const sent = await waitFor(() => {
     const composerIsEmpty = elementText(composer) === "";
-    const sentTextIsVisible = [...document.querySelectorAll("*")].some((element) =>
-      element !== composer && isVisible(element) && elementText(element) === textToSend
+    const sentTextIsVisible = visibleMatchingElements(conversationRoot, textToSend).some((element) =>
+      !visibleMessagesBeforeSend.has(element)
     );
     return composerIsEmpty && sentTextIsVisible;
   });
