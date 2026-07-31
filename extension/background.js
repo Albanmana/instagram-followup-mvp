@@ -9,7 +9,7 @@ import {
 } from "./linkedin-send.js";
 import { createApiClient, chromeStorageAdapter } from "./api-client.js";
 import { createExtensionResult } from "./result-reporting.js";
-import { enqueuePendingResult, flushPendingResults } from "./result-outbox.js";
+import { createResultReportCoordinator } from "./result-outbox.js";
 
 // ── Defaults (from .env) ─────────────────────────────────────
 const DEFAULT_BATCH_DELAY = 400;
@@ -18,22 +18,28 @@ const SCRAPE_PROFILE_TIMEOUT_MS = 12000;
 const SCRAPE_LOG_LIMIT = 300;
 const RESULT_REPORT_RETRY_ALARM = "COLD_DM_RESULT_REPORT_RETRY";
 const resultApi = createApiClient({ storage: chromeStorageAdapter, baseUrl: "" });
+const resultReportCoordinator = createResultReportCoordinator({
+  storage: chromeStorageAdapter,
+  reportResults: resultApi.reportResults,
+  alarms: chrome.alarms,
+  alarmName: RESULT_REPORT_RETRY_ALARM,
+});
 
 async function flushResultOutbox() {
-  const outcome = await flushPendingResults({
-    storage: chromeStorageAdapter,
-    reportResults: resultApi.reportResults,
+  return resultReportCoordinator.flush();
+}
+
+function startResultOutboxFlush() {
+  void flushResultOutbox().catch(() => {
+    void resultReportCoordinator.scheduleRetry().catch(() => undefined);
   });
-  if (outcome.ok) await chrome.alarms.clear(RESULT_REPORT_RETRY_ALARM);
-  else chrome.alarms.create(RESULT_REPORT_RETRY_ALARM, { delayInMinutes: 1 });
-  return outcome;
 }
 
 async function reportBatchLog(entry) {
   const result = createExtensionResult(entry);
   if (!result) return;
-  await enqueuePendingResult(chromeStorageAdapter, result);
-  await flushResultOutbox();
+  await resultReportCoordinator.enqueue(result);
+  startResultOutboxFlush();
 }
 
 const adapters = createPlatformAdapters({
@@ -1427,30 +1433,29 @@ async function processBatchItem(index) {
     handle: row.recipient?.handle ?? row.handle,
   };
 
+  let entry;
   try {
     if (!adapter) throw new Error("Unsupported platform.");
     const validationError = adapter.validateItem(row);
     if (validationError) throw new Error(validationError);
     const result = normalizeSenderOutcome(await adapter.send(row));
     const status = result.status;
-    const entry = {
+    entry = {
       ...batchLogFields,
       status,
       ...(status !== "sent" && result?.reason ? { reason: result.reason } : {}),
       at: result?.at ?? new Date().toISOString(),
     };
-    await appendBatchLog(entry);
-    void reportBatchLog(entry).catch(() => undefined);
   } catch (error) {
-    const entry = {
+    entry = {
       ...batchLogFields,
       status: "error",
       error: error.message,
       at: new Date().toISOString()
     };
-    await appendBatchLog(entry);
-    void reportBatchLog(entry).catch(() => undefined);
   }
+  await appendBatchLog(entry);
+  await reportBatchLog(entry);
 
   const nextIndex = index + 1;
   await chrome.storage.local.set({ batchIndex: nextIndex });
@@ -1464,7 +1469,7 @@ async function processBatchItem(index) {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === RESULT_REPORT_RETRY_ALARM) {
-    void flushResultOutbox();
+    startResultOutboxFlush();
     return;
   }
   if (alarm.name === "COLD_DM_BATCH_NEXT") {

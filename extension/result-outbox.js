@@ -66,3 +66,71 @@ export async function flushPendingResults({ storage, reportResults }) {
   });
   return { ok: true, remaining: [] };
 }
+
+export function createResultReportCoordinator({
+  storage,
+  reportResults,
+  alarms,
+  alarmName,
+  retryDelayInMinutes = 1,
+}) {
+  let alarmGeneration = 0;
+  let flushTail = Promise.resolve();
+
+  async function createRetryAlarm() {
+    alarmGeneration += 1;
+    await alarms.create(alarmName, { delayInMinutes: retryDelayInMinutes });
+  }
+
+  async function scheduleRetry() {
+    try {
+      await createRetryAlarm();
+    } catch {
+      await createRetryAlarm();
+    }
+  }
+
+  async function enqueue(result) {
+    await enqueuePendingResult(storage, result);
+    await scheduleRetry();
+  }
+
+  async function coordinatedFlush() {
+    const startingAlarmGeneration = alarmGeneration;
+
+    try {
+      const outcome = await flushPendingResults({ storage, reportResults });
+      if (!outcome.ok) {
+        await scheduleRetry();
+        return outcome;
+      }
+
+      const { [PENDING_RESULT_REPORTS_KEY]: current = [] } =
+        await storage.get(PENDING_RESULT_REPORTS_KEY);
+      if (current.length > 0) {
+        await scheduleRetry();
+      } else if (alarmGeneration === startingAlarmGeneration) {
+        await alarms.clear(alarmName);
+      }
+      return outcome;
+    } catch (error) {
+      await scheduleRetry();
+      return {
+        ok: false,
+        error: error instanceof Error && error.message
+          ? error.message
+          : "Could not coordinate result reporting",
+      };
+    }
+  }
+
+  function flush() {
+    const current = flushTail
+      .catch(() => undefined)
+      .then(coordinatedFlush);
+    flushTail = current;
+    return current;
+  }
+
+  return { enqueue, flush, scheduleRetry };
+}
