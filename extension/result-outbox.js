@@ -1,4 +1,5 @@
 export const PENDING_RESULT_REPORTS_KEY = "pendingResultReports";
+const RESULT_REPORT_CHUNK_SIZE = 500;
 
 const sameResult = (left, right) =>
   left.actionId === right.actionId && left.at === right.at;
@@ -36,35 +37,45 @@ export async function flushPendingResults({ storage, reportResults }) {
   });
   if (!pending.length) return { ok: true, remaining: [] };
 
-  let response;
-  try {
-    response = await reportResults(pending);
-  } catch (error) {
-    return {
-      ok: false,
-      remaining: pending,
-      error: error instanceof Error && error.message
-        ? error.message
-        : "Could not report results",
-    };
-  }
-  if (!response?.ok) {
-    return {
-      ok: false,
-      remaining: pending,
-      error: response?.error ?? "Could not report results",
-    };
+  for (let offset = 0; offset < pending.length; offset += RESULT_REPORT_CHUNK_SIZE) {
+    const chunk = pending.slice(offset, offset + RESULT_REPORT_CHUNK_SIZE);
+    let response;
+    try {
+      response = await reportResults(chunk);
+    } catch (error) {
+      return {
+        ok: false,
+        remaining: pending.slice(offset),
+        error: error instanceof Error && error.message
+          ? error.message
+          : "Could not report results",
+      };
+    }
+    if (!response?.ok) {
+      return {
+        ok: false,
+        remaining: pending.slice(offset),
+        error: response?.error ?? "Could not report results",
+      };
+    }
+
+    await withStorageLock(storage, async () => {
+      const { [PENDING_RESULT_REPORTS_KEY]: current = [] } =
+        await storage.get(PENDING_RESULT_REPORTS_KEY);
+      const remaining = current.filter(
+        (item) => !chunk.some((reported) => sameResult(item, reported)),
+      );
+      await storage.set({ [PENDING_RESULT_REPORTS_KEY]: remaining });
+    });
   }
 
-  await withStorageLock(storage, async () => {
-    const { [PENDING_RESULT_REPORTS_KEY]: current = [] } =
-      await storage.get(PENDING_RESULT_REPORTS_KEY);
-    const remaining = current.filter(
-      (item) => !pending.some((reported) => sameResult(item, reported)),
-    );
-    await storage.set({ [PENDING_RESULT_REPORTS_KEY]: remaining });
-  });
   return { ok: true, remaining: [] };
+}
+
+export function initializeResultReportRecovery({ runtime, recover }) {
+  runtime.onStartup.addListener(recover);
+  runtime.onInstalled.addListener(recover);
+  return recover();
 }
 
 export function createResultReportCoordinator({

@@ -9,7 +9,10 @@ import {
 } from "./linkedin-send.js";
 import { createApiClient, chromeStorageAdapter } from "./api-client.js";
 import { createExtensionResult } from "./result-reporting.js";
-import { createResultReportCoordinator } from "./result-outbox.js";
+import {
+  createResultReportCoordinator,
+  initializeResultReportRecovery,
+} from "./result-outbox.js";
 
 // ── Defaults (from .env) ─────────────────────────────────────
 const DEFAULT_BATCH_DELAY = 400;
@@ -34,6 +37,11 @@ function startResultOutboxFlush() {
     void resultReportCoordinator.scheduleRetry().catch(() => undefined);
   });
 }
+
+initializeResultReportRecovery({
+  runtime: chrome.runtime,
+  recover: startResultOutboxFlush,
+});
 
 async function reportBatchLog(entry) {
   const result = createExtensionResult(entry);

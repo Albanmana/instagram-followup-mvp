@@ -76,6 +76,27 @@ function memoryAlarms({ rejectCreateCalls = [], rejectClearCalls = [] } = {}) {
   };
 }
 
+function memoryEvent() {
+  const listeners = [];
+  return {
+    addListener(listener) {
+      listeners.push(listener);
+    },
+    async emit(...args) {
+      await Promise.all(listeners.map((listener) => listener(...args)));
+    },
+  };
+}
+
+function pendingResult(index) {
+  return {
+    actionId: `action-${index}`,
+    handle: `handle-${index}`,
+    status: "sent",
+    at: new Date(Date.UTC(2026, 6, 31, 11, 0, index)).toISOString(),
+  };
+}
+
 test("persists a terminal result before its first delivery attempt", async () => {
   const storage = memoryStorage();
   const result = sentResult();
@@ -138,6 +159,50 @@ test("retains a result enqueued while a successful flush is in flight", async ()
   assert.deepEqual(storage._data.pendingResultReports, [enqueuedDuringFlush]);
 });
 
+test("drains 501 pending results in ordered requests of at most 500", async () => {
+  const pending = Array.from({ length: 501 }, (_, index) => pendingResult(index));
+  const storage = memoryStorage({ pendingResultReports: pending });
+  const deliveredBatches = [];
+
+  const outcome = await flushPendingResults({
+    storage,
+    reportResults: async (results) => {
+      deliveredBatches.push(results);
+      if (deliveredBatches.length === 2) {
+        assert.deepEqual(storage._data.pendingResultReports, [pending[500]]);
+      }
+      return { ok: true };
+    },
+  });
+
+  assert.deepEqual(deliveredBatches.map((batch) => batch.length), [500, 1]);
+  assert.deepEqual(deliveredBatches[0], pending.slice(0, 500));
+  assert.deepEqual(deliveredBatches[1], [pending[500]]);
+  assert.deepEqual(outcome, { ok: true, remaining: [] });
+  assert.deepEqual(storage._data.pendingResultReports, []);
+});
+
+test("retains the failed chunk and every later result in original order", async () => {
+  const pending = Array.from({ length: 1001 }, (_, index) => pendingResult(index));
+  const storage = memoryStorage({ pendingResultReports: pending });
+  const deliveredBatches = [];
+
+  const outcome = await flushPendingResults({
+    storage,
+    reportResults: async (results) => {
+      deliveredBatches.push(results);
+      return deliveredBatches.length === 1
+        ? { ok: true }
+        : { ok: false, error: "Temporary failure" };
+    },
+  });
+
+  assert.deepEqual(deliveredBatches.map((batch) => batch.length), [500, 500]);
+  assert.equal(outcome.ok, false);
+  assert.deepEqual(outcome.remaining, pending.slice(500));
+  assert.deepEqual(storage._data.pendingResultReports, pending.slice(500));
+});
+
 test("returns a failure outcome when delivery rejects and retains the queue", async () => {
   const result = failedResult();
   const storage = memoryStorage({ pendingResultReports: [result] });
@@ -155,6 +220,74 @@ test("returns a failure outcome when delivery rejects and retains the queue", as
     error: "offline",
   });
   assert.deepEqual(storage._data.pendingResultReports, [result]);
+});
+
+test("recovers pending results on service-worker initialization, startup, and install", async () => {
+  assert.equal(typeof resultOutbox.initializeResultReportRecovery, "function");
+
+  const runtime = {
+    onStartup: memoryEvent(),
+    onInstalled: memoryEvent(),
+  };
+  const storage = memoryStorage({ pendingResultReports: [sentResult()] });
+  const alarms = memoryAlarms();
+  const deliveredBatches = [];
+  const coordinator = resultOutbox.createResultReportCoordinator({
+    storage,
+    alarms,
+    alarmName: "COLD_DM_RESULT_REPORT_RETRY",
+    reportResults: async (results) => {
+      deliveredBatches.push(results);
+      return { ok: true };
+    },
+  });
+
+  await resultOutbox.initializeResultReportRecovery({
+    runtime,
+    recover: () => coordinator.flush(),
+  });
+  assert.deepEqual(storage._data.pendingResultReports, []);
+
+  await enqueuePendingResult(storage, skippedResult());
+  await runtime.onStartup.emit();
+  assert.deepEqual(storage._data.pendingResultReports, []);
+
+  await enqueuePendingResult(storage, failedResult());
+  await runtime.onInstalled.emit();
+
+  assert.deepEqual(deliveredBatches, [
+    [sentResult()],
+    [skippedResult()],
+    [failedResult()],
+  ]);
+  assert.deepEqual(storage._data.pendingResultReports, []);
+});
+
+test("service-worker recovery schedules a retry when persisted delivery fails", async () => {
+  assert.equal(typeof resultOutbox.initializeResultReportRecovery, "function");
+
+  const result = failedResult();
+  const runtime = {
+    onStartup: memoryEvent(),
+    onInstalled: memoryEvent(),
+  };
+  const storage = memoryStorage({ pendingResultReports: [result] });
+  const alarms = memoryAlarms();
+  const coordinator = resultOutbox.createResultReportCoordinator({
+    storage,
+    alarms,
+    alarmName: "COLD_DM_RESULT_REPORT_RETRY",
+    reportResults: async () => ({ ok: false, error: "offline" }),
+  });
+
+  const outcome = await resultOutbox.initializeResultReportRecovery({
+    runtime,
+    recover: () => coordinator.flush(),
+  });
+
+  assert.equal(outcome.ok, false);
+  assert.deepEqual(storage._data.pendingResultReports, [result]);
+  assert.equal(alarms.active.has("COLD_DM_RESULT_REPORT_RETRY"), true);
 });
 
 test("a stale successful flush cannot clear recovery for a newer failed result", async () => {
