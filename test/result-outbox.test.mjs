@@ -284,3 +284,19 @@ test("does not own recovery until the new result is durably persisted", async ()
   assert.deepEqual(storage._data.pendingResultReports, [result]);
   assert.equal(alarms.active.has("COLD_DM_RESULT_REPORT_RETRY"), true);
 });
+
+test("durable enqueue resolves when alarm scheduling remains unavailable", async () => {
+  const result = sentResult();
+  const storage = memoryStorage();
+  const alarms = memoryAlarms({ rejectCreateCalls: [1, 2] });
+  const coordinator = resultOutbox.createResultReportCoordinator({
+    storage,
+    alarms,
+    alarmName: "COLD_DM_RESULT_REPORT_RETRY",
+    reportResults: async () => ({ ok: true }),
+  });
+
+  await assert.doesNotReject(coordinator.enqueue(result));
+
+  assert.deepEqual(storage._data.pendingResultReports, [result]);
+});

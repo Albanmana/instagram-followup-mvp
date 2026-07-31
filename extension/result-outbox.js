@@ -92,7 +92,7 @@ export function createResultReportCoordinator({
 
   async function enqueue(result) {
     await enqueuePendingResult(storage, result);
-    await scheduleRetry();
+    void scheduleRetry().catch(() => undefined);
   }
 
   async function coordinatedFlush() {
