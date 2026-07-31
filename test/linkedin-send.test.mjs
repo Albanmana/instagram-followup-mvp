@@ -93,7 +93,7 @@ test("classifies unavailable direct messaging as skipped with an ISO timestamp",
   assert.ok(Number.isFinite(Date.parse(outcome.at)));
 });
 
-test("discovers only the observed Message compose link on the expected profile", () => {
+test("discovers only the observed Message compose link on the expected profile", async () => {
   const originalDocument = globalThis.document;
   const heading = {
     textContent: "Alice Martin",
@@ -133,7 +133,7 @@ test("discovers only the observed Message compose link on the expected profile",
 
   try {
     assert.deepEqual(
-      discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/"),
+      await discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/"),
       {
         status: "ready",
         composeHref: "/messaging/compose/?recipient=alice-id",
@@ -146,7 +146,7 @@ test("discovers only the observed Message compose link on the expected profile",
   }
 });
 
-test("discovers the sole direct Message action when the visible profile main has no heading", () => {
+test("discovers the sole direct Message action when the visible profile main has no heading", async () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;
   const directProfileSection = {
@@ -192,7 +192,7 @@ test("discovers the sole direct Message action when the visible profile main has
 
   try {
     assert.deepEqual(
-      discoverLinkedInComposeHref("https://www.linkedin.com/in/brice-biaou-32387b156/"),
+      await discoverLinkedInComposeHref("https://www.linkedin.com/in/brice-biaou-32387b156/"),
       {
         status: "ready",
         composeHref: "/messaging/compose/?recipient=brice-id",
@@ -205,7 +205,181 @@ test("discovers the sole direct Message action when the visible profile main has
   }
 });
 
-test("ignores a direct Message candidate hidden by an ancestor", () => {
+test("discovers first-degree evidence rendered as a paragraph in the live profile section", async () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const firstDegreeParagraph = {
+    tagName: "P",
+    textContent: "· 1st",
+    hidden: false,
+    getAttribute: () => null,
+  };
+  const messageLink = {
+    tagName: "A",
+    textContent: "Message",
+    hidden: false,
+    getAttribute: (attribute) => attribute === "href"
+      ? "/messaging/compose/?recipient=brice-id"
+      : null,
+  };
+  const directProfileSection = {
+    hidden: false,
+    querySelectorAll(selector) {
+      return selector.split(",").map((part) => part.trim()).includes("p")
+        ? [firstDegreeParagraph, messageLink]
+        : [messageLink];
+    },
+  };
+  const main = {
+    hidden: false,
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === "section" ? [directProfileSection] : [],
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/brice-biaou-32387b156/" },
+    querySelector: (selector) => selector === "main" ? main : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    assert.deepEqual(
+      await discoverLinkedInComposeHref("https://www.linkedin.com/in/brice-biaou-32387b156/"),
+      {
+        status: "ready",
+        composeHref: "/messaging/compose/?recipient=brice-id",
+        recipientId: "brice-id",
+      }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("waits for the LinkedIn profile actions to render before discovery", async () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const originalSetTimeout = globalThis.setTimeout;
+  const firstDegreeParagraph = {
+    textContent: "· 1st",
+    hidden: false,
+    getAttribute: () => null,
+  };
+  const messageLink = {
+    textContent: "Message",
+    hidden: false,
+    getAttribute: (attribute) => attribute === "href"
+      ? "/messaging/compose/?recipient=brice-id"
+      : null,
+  };
+  const directProfileSection = {
+    hidden: false,
+    querySelectorAll() {
+      return [firstDegreeParagraph, messageLink];
+    },
+  };
+  let sectionChecks = 0;
+  const main = {
+    hidden: false,
+    querySelector: () => null,
+    querySelectorAll(selector) {
+      if (selector !== "section") return [];
+      sectionChecks += 1;
+      return sectionChecks > 1 ? [directProfileSection] : [];
+    },
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/brice-biaou-32387b156/" },
+    querySelector: (selector) => selector === "main" ? main : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+  globalThis.setTimeout = (callback) => {
+    callback();
+    return 0;
+  };
+
+  try {
+    assert.deepEqual(
+      await discoverLinkedInComposeHref("https://www.linkedin.com/in/brice-biaou-32387b156/"),
+      {
+        status: "ready",
+        composeHref: "/messaging/compose/?recipient=brice-id",
+        recipientId: "brice-id",
+      }
+    );
+    assert.ok(sectionChecks > 1);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("keeps a visible Message action whose layout wrapper has zero size", async () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const wrapper = {
+    hidden: false,
+    parentElement: null,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 0, height: 0 }),
+  };
+  const firstDegreeParagraph = {
+    textContent: "· 1st",
+    hidden: false,
+    parentElement: wrapper,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 30, height: 18 }),
+  };
+  const messageLink = {
+    textContent: "Message",
+    hidden: false,
+    parentElement: wrapper,
+    getAttribute: (attribute) => attribute === "href"
+      ? "/messaging/compose/?recipient=brice-id"
+      : null,
+    getBoundingClientRect: () => ({ width: 90, height: 32 }),
+  };
+  const directProfileSection = {
+    hidden: false,
+    parentElement: null,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 600, height: 300 }),
+    querySelectorAll() {
+      return [firstDegreeParagraph, messageLink];
+    },
+  };
+  wrapper.parentElement = directProfileSection;
+  const main = {
+    hidden: false,
+    parentElement: null,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 1000, height: 900 }),
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === "section" ? [directProfileSection] : [],
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/brice-biaou-32387b156/" },
+    querySelector: (selector) => selector === "main" ? main : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    assert.deepEqual(
+      await discoverLinkedInComposeHref("https://www.linkedin.com/in/brice-biaou-32387b156/"),
+      {
+        status: "ready",
+        composeHref: "/messaging/compose/?recipient=brice-id",
+        recipientId: "brice-id",
+      }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("ignores a direct Message candidate hidden by an ancestor", async () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;
   const hiddenAncestor = {
@@ -244,7 +418,7 @@ test("ignores a direct Message candidate hidden by an ancestor", () => {
     : { display: "block", visibility: "visible" };
 
   try {
-    const outcome = discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
+    const outcome = await discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
     assert.equal(outcome.status, "skipped");
     assert.notEqual(outcome.recipientId, "hidden-recipient");
   } finally {
@@ -253,7 +427,7 @@ test("ignores a direct Message candidate hidden by an ancestor", () => {
   }
 });
 
-test("skips a global Message link that is outside the visible target profile actions", () => {
+test("skips a global Message link that is outside the visible target profile actions", async () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;
   const heading = { textContent: "Alice", hidden: false, getAttribute: () => null };
@@ -277,7 +451,7 @@ test("skips a global Message link that is outside the visible target profile act
   globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
 
   try {
-    const outcome = discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
+    const outcome = await discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
     assert.equal(outcome.status, "skipped");
     assert.match(outcome.reason, /direct Message action/i);
   } finally {
@@ -286,7 +460,7 @@ test("skips a global Message link that is outside the visible target profile act
   }
 });
 
-test("skips clear InMail or Open Profile message paths", () => {
+test("skips clear InMail or Open Profile message paths", async () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;
   const makeProfileActions = (blockedLabel) => {
@@ -318,7 +492,7 @@ test("skips clear InMail or Open Profile message paths", () => {
           ? makeProfileActions(blockedLabel)
           : null,
       };
-      const outcome = discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
+      const outcome = await discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
       assert.equal(outcome.status, "skipped");
       assert.match(outcome.reason, /direct connection/i);
     }
@@ -328,7 +502,7 @@ test("skips clear InMail or Open Profile message paths", () => {
   }
 });
 
-test("skips when the visible profile cannot prove a first-degree connection", () => {
+test("skips when the visible profile cannot prove a first-degree connection", async () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;
   const heading = { textContent: "Alice", hidden: false, getAttribute: () => null };
@@ -350,7 +524,7 @@ test("skips when the visible profile cannot prove a first-degree connection", ()
   globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
 
   try {
-    const outcome = discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
+    const outcome = await discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
     assert.equal(outcome.status, "skipped");
     assert.match(outcome.reason, /direct connection/i);
   } finally {
