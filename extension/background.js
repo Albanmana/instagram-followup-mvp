@@ -7,12 +7,34 @@ import {
   sendLinkedInComposeMessage,
   validateLinkedInTestPayload,
 } from "./linkedin-send.js";
+import { createApiClient, chromeStorageAdapter } from "./api-client.js";
+import { createExtensionResult } from "./result-reporting.js";
+import { enqueuePendingResult, flushPendingResults } from "./result-outbox.js";
 
 // ── Defaults (from .env) ─────────────────────────────────────
 const DEFAULT_BATCH_DELAY = 400;
 const SCRAPE_POST_TIMEOUT_MS = 30000;
 const SCRAPE_PROFILE_TIMEOUT_MS = 12000;
 const SCRAPE_LOG_LIMIT = 300;
+const RESULT_REPORT_RETRY_ALARM = "COLD_DM_RESULT_REPORT_RETRY";
+const resultApi = createApiClient({ storage: chromeStorageAdapter, baseUrl: "" });
+
+async function flushResultOutbox() {
+  const outcome = await flushPendingResults({
+    storage: chromeStorageAdapter,
+    reportResults: resultApi.reportResults,
+  });
+  if (outcome.ok) await chrome.alarms.clear(RESULT_REPORT_RETRY_ALARM);
+  else chrome.alarms.create(RESULT_REPORT_RETRY_ALARM, { delayInMinutes: 1 });
+  return outcome;
+}
+
+async function reportBatchLog(entry) {
+  const result = createExtensionResult(entry);
+  if (!result) return;
+  await enqueuePendingResult(chromeStorageAdapter, result);
+  await flushResultOutbox();
+}
 
 const adapters = createPlatformAdapters({
   sendInstagramMessage,
@@ -1411,19 +1433,23 @@ async function processBatchItem(index) {
     if (validationError) throw new Error(validationError);
     const result = normalizeSenderOutcome(await adapter.send(row));
     const status = result.status;
-    await appendBatchLog({
+    const entry = {
       ...batchLogFields,
       status,
       ...(status !== "sent" && result?.reason ? { reason: result.reason } : {}),
       at: result?.at ?? new Date().toISOString(),
-    });
+    };
+    await appendBatchLog(entry);
+    void reportBatchLog(entry).catch(() => undefined);
   } catch (error) {
-    await appendBatchLog({
+    const entry = {
       ...batchLogFields,
       status: "error",
       error: error.message,
       at: new Date().toISOString()
-    });
+    };
+    await appendBatchLog(entry);
+    void reportBatchLog(entry).catch(() => undefined);
   }
 
   const nextIndex = index + 1;
@@ -1437,6 +1463,10 @@ async function processBatchItem(index) {
 }
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === RESULT_REPORT_RETRY_ALARM) {
+    void flushResultOutbox();
+    return;
+  }
   if (alarm.name === "COLD_DM_BATCH_NEXT") {
     const { batchIndex } = await getBatchState();
     await processBatchItem(batchIndex);
