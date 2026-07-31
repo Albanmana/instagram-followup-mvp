@@ -56,9 +56,14 @@ export function discoverLinkedInComposeHref(expectedProfileUrl) {
       .replace(/\s+/g, " ")
       .trim();
   const isVisible = (element) => {
-    if (!element || element.hidden || element.getAttribute?.("aria-hidden") === "true") return false;
-    const style = getComputedStyle(element);
-    return style.display !== "none" && style.visibility !== "hidden";
+    for (let current = element; current; current = current.parentElement) {
+      if (current.hidden || current.getAttribute?.("aria-hidden") === "true") return false;
+      const style = getComputedStyle(current);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      const rect = current.getBoundingClientRect?.();
+      if (rect && (rect.width === 0 || rect.height === 0)) return false;
+    }
+    return Boolean(element);
   };
   const composeRecipient = (href) => {
     try {

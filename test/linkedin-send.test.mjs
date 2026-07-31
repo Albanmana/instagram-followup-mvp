@@ -205,6 +205,54 @@ test("discovers the sole direct Message action when the visible profile main has
   }
 });
 
+test("ignores a direct Message candidate hidden by an ancestor", () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const hiddenAncestor = {
+    hidden: false,
+    getAttribute: () => null,
+    parentElement: null,
+  };
+  const hiddenProfileSection = {
+    hidden: false,
+    parentElement: hiddenAncestor,
+    querySelectorAll() {
+      return [
+        { textContent: "1st", hidden: false, getAttribute: () => null },
+        {
+          textContent: "Message",
+          hidden: false,
+          getAttribute: (attribute) => attribute === "href"
+            ? "/messaging/compose/?recipient=hidden-recipient"
+            : null,
+        },
+      ];
+    },
+  };
+  const main = {
+    hidden: false,
+    parentElement: null,
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === "section" ? [hiddenProfileSection] : [],
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/alice/" },
+    querySelector: (selector) => selector === "main" ? main : null,
+  };
+  globalThis.getComputedStyle = (element) => element === hiddenAncestor
+    ? { display: "none", visibility: "visible" }
+    : { display: "block", visibility: "visible" };
+
+  try {
+    const outcome = discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
+    assert.equal(outcome.status, "skipped");
+    assert.notEqual(outcome.recipientId, "hidden-recipient");
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
 test("skips a global Message link that is outside the visible target profile actions", () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;
