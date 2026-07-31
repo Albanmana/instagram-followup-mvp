@@ -43,6 +43,14 @@ function failedResult() {
   };
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 test("persists a terminal result before its first delivery attempt", async () => {
   const storage = memoryStorage();
   const result = sentResult();
@@ -84,5 +92,42 @@ test("deduplicates a result by actionId and timestamp", async () => {
   await enqueuePendingResult(storage, result);
   await enqueuePendingResult(storage, result);
 
+  assert.deepEqual(storage._data.pendingResultReports, [result]);
+});
+
+test("retains a result enqueued while a successful flush is in flight", async () => {
+  const delivered = sentResult();
+  const enqueuedDuringFlush = skippedResult();
+  const storage = memoryStorage({ pendingResultReports: [delivered] });
+  const delivery = deferred();
+
+  const flush = flushPendingResults({
+    storage,
+    reportResults: async () => delivery.promise,
+  });
+  await Promise.resolve();
+  await enqueuePendingResult(storage, enqueuedDuringFlush);
+  delivery.resolve({ ok: true });
+
+  assert.deepEqual(await flush, { ok: true, remaining: [] });
+  assert.deepEqual(storage._data.pendingResultReports, [enqueuedDuringFlush]);
+});
+
+test("returns a failure outcome when delivery rejects and retains the queue", async () => {
+  const result = failedResult();
+  const storage = memoryStorage({ pendingResultReports: [result] });
+
+  const outcome = await flushPendingResults({
+    storage,
+    reportResults: async () => {
+      throw new Error("offline");
+    },
+  });
+
+  assert.deepEqual(outcome, {
+    ok: false,
+    remaining: [result],
+    error: "offline",
+  });
   assert.deepEqual(storage._data.pendingResultReports, [result]);
 });

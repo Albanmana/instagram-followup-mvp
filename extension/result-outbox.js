@@ -3,22 +3,51 @@ export const PENDING_RESULT_REPORTS_KEY = "pendingResultReports";
 const sameResult = (left, right) =>
   left.actionId === right.actionId && left.at === right.at;
 
+const storageOperations = new WeakMap();
+
+function withStorageLock(storage, operation) {
+  const previous = storageOperations.get(storage) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(operation);
+  storageOperations.set(storage, next);
+  return next.finally(() => {
+    if (storageOperations.get(storage) === next) {
+      storageOperations.delete(storage);
+    }
+  });
+}
+
 export async function enqueuePendingResult(storage, result) {
-  const { [PENDING_RESULT_REPORTS_KEY]: pending = [] } =
-    await storage.get(PENDING_RESULT_REPORTS_KEY);
-  const next = pending.some((item) => sameResult(item, result))
-    ? pending
-    : [...pending, result];
-  await storage.set({ [PENDING_RESULT_REPORTS_KEY]: next });
-  return next;
+  return withStorageLock(storage, async () => {
+    const { [PENDING_RESULT_REPORTS_KEY]: pending = [] } =
+      await storage.get(PENDING_RESULT_REPORTS_KEY);
+    const next = pending.some((item) => sameResult(item, result))
+      ? pending
+      : [...pending, result];
+    await storage.set({ [PENDING_RESULT_REPORTS_KEY]: next });
+    return next;
+  });
 }
 
 export async function flushPendingResults({ storage, reportResults }) {
-  const { [PENDING_RESULT_REPORTS_KEY]: pending = [] } =
-    await storage.get(PENDING_RESULT_REPORTS_KEY);
+  const pending = await withStorageLock(storage, async () => {
+    const { [PENDING_RESULT_REPORTS_KEY]: stored = [] } =
+      await storage.get(PENDING_RESULT_REPORTS_KEY);
+    return stored;
+  });
   if (!pending.length) return { ok: true, remaining: [] };
 
-  const response = await reportResults(pending);
+  let response;
+  try {
+    response = await reportResults(pending);
+  } catch (error) {
+    return {
+      ok: false,
+      remaining: pending,
+      error: error instanceof Error && error.message
+        ? error.message
+        : "Could not report results",
+    };
+  }
   if (!response?.ok) {
     return {
       ok: false,
@@ -27,6 +56,13 @@ export async function flushPendingResults({ storage, reportResults }) {
     };
   }
 
-  await storage.set({ [PENDING_RESULT_REPORTS_KEY]: [] });
+  await withStorageLock(storage, async () => {
+    const { [PENDING_RESULT_REPORTS_KEY]: current = [] } =
+      await storage.get(PENDING_RESULT_REPORTS_KEY);
+    const remaining = current.filter(
+      (item) => !pending.some((reported) => sameResult(item, reported)),
+    );
+    await storage.set({ [PENDING_RESULT_REPORTS_KEY]: remaining });
+  });
   return { ok: true, remaining: [] };
 }
