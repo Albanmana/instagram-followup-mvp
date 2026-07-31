@@ -54,3 +54,20 @@ test("does not create a LinkedIn result without a trustworthy non-empty handle",
     at: "2026-07-28T10:00:00.000Z",
   }), null);
 });
+
+test("converts a skipped LinkedIn batch log into a strict result", () => {
+  assert.deepEqual(createExtensionResult({
+    actionId: "00000000-0000-4000-8000-000000000001",
+    platform: "linkedin",
+    recipient: { profileUrl: "https://www.linkedin.com/in/alice/" },
+    status: "skipped",
+    reason: "LinkedIn Send action is unavailable.",
+    at: "2026-07-31T10:00:00.000Z",
+  }), {
+    actionId: "00000000-0000-4000-8000-000000000001",
+    handle: "alice",
+    status: "skipped",
+    reason: "LinkedIn Send action is unavailable.",
+    at: "2026-07-31T10:00:00.000Z",
+  });
+});

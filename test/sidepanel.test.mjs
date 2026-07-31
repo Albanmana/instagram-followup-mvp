@@ -571,7 +571,7 @@ test("Start does not claim stale rows replaced by a same-platform refresh", { co
   });
 });
 
-test("Instagram result reporting emits only the strict Cold DM result contract", { concurrency: false }, async () => {
+test("a completed batch does not post results from the side panel", { concurrency: false }, async () => {
   const row = {
     actionId: "action-1",
     messageId: "message-1",
@@ -600,15 +600,7 @@ test("Instagram result reporting emits only the strict Cold DM result contract",
       await document.getElementById("stop-button").trigger("click");
       await settle();
 
-      const resultRequest = requests.find(({ url }) => url.includes("/results"));
-      assert.ok(resultRequest);
-      const result = JSON.parse(resultRequest.options.body).results[0];
-      assert.deepEqual(result, {
-        actionId: "action-1",
-        handle: "alice",
-        status: "sent",
-        at: "2026-07-28T10:00:00.000Z",
-      });
+      assert.equal(requests.some(({ url }) => url.includes("/api/ext/v1/results")), false);
     },
   });
 });
