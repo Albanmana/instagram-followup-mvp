@@ -146,6 +146,65 @@ test("discovers only the observed Message compose link on the expected profile",
   }
 });
 
+test("discovers the sole direct Message action when the visible profile main has no heading", () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const directProfileSection = {
+    hidden: false,
+    querySelectorAll() {
+      return [
+        { textContent: "brice biaou", hidden: false, getAttribute: () => null },
+        { textContent: "1st", hidden: false, getAttribute: () => null },
+        {
+          textContent: "Message",
+          hidden: false,
+          getAttribute: (attribute) => attribute === "href"
+            ? "/messaging/compose/?recipient=brice-id"
+            : null,
+        },
+      ];
+    },
+  };
+  const recommendationSection = {
+    hidden: false,
+    querySelectorAll() {
+      return [{
+        textContent: "Message",
+        hidden: false,
+        getAttribute: (attribute) => attribute === "href"
+          ? "/messaging/compose/?recipient=recommendation-id"
+          : null,
+      }];
+    },
+  };
+  const main = {
+    hidden: false,
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === "section"
+      ? [directProfileSection, recommendationSection]
+      : [],
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/brice-biaou-32387b156/" },
+    querySelector: (selector) => selector === "main" ? main : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    assert.deepEqual(
+      discoverLinkedInComposeHref("https://www.linkedin.com/in/brice-biaou-32387b156/"),
+      {
+        status: "ready",
+        composeHref: "/messaging/compose/?recipient=brice-id",
+        recipientId: "brice-id",
+      }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
 test("skips a global Message link that is outside the visible target profile actions", () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;

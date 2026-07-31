@@ -86,41 +86,49 @@ export function discoverLinkedInComposeHref(expectedProfileUrl) {
   }
 
   const main = document.querySelector("main");
-  const profileHeading = main?.querySelector?.("h1");
-  if (!main || !profileHeading || !isVisible(profileHeading)) {
-    return { status: "skipped", reason: "The visible target LinkedIn profile actions could not be identified." };
-  }
-  const profileActions = profileHeading.closest?.("section");
-  if (!profileActions || (main.contains && !main.contains(profileActions))) {
+  if (!main || !isVisible(main)) {
     return { status: "skipped", reason: "The visible target LinkedIn profile actions could not be identified." };
   }
 
-  const observed = [...(profileActions.querySelectorAll?.("[aria-label], a, button, span") ?? [])]
-    .filter(isVisible);
-  const labels = observed.map(elementText);
-  if (labels.some((label) => /\b(?:inmail|open profile)\b/i.test(label))) {
+  const sections = [...(main.querySelectorAll?.("section") ?? [])];
+  const legacySection = main.querySelector?.("h1")?.closest?.("section");
+  if (legacySection && !sections.includes(legacySection)) sections.push(legacySection);
+  if (sections.length === 0) {
+    return { status: "skipped", reason: "The visible target LinkedIn profile actions could not be identified." };
+  }
+
+  const candidates = sections.filter(isVisible).map((section) => {
+    const observed = [...(section.querySelectorAll?.("[aria-label], a, button, span") ?? [])]
+      .filter(isVisible);
+    const labels = observed.map(elementText);
+    const hasBlockedPath = labels.some((label) => /\b(?:inmail|open profile)\b/i.test(label));
+    const isDirectConnection = labels.some((label) =>
+      /\b1st\b/i.test(label) || /\b1st degree connection\b/i.test(label)
+    );
+    const composeLinks = observed
+      .filter((element) => elementText(element) === "Message")
+      .map((element) => ({
+        composeHref: element.getAttribute?.("href"),
+        recipientId: composeRecipient(element.getAttribute?.("href")),
+      }))
+      .filter(({ composeHref, recipientId }) => composeHref && recipientId);
+
+    return { hasBlockedPath, isDirectConnection, composeLinks };
+  });
+
+  const directCandidates = candidates.filter(({ hasBlockedPath, isDirectConnection, composeLinks }) =>
+    !hasBlockedPath && isDirectConnection && composeLinks.length === 1
+  );
+  if (directCandidates.length === 1) {
+    return { status: "ready", ...directCandidates[0].composeLinks[0] };
+  }
+  if (candidates.some(({ hasBlockedPath, composeLinks }) => hasBlockedPath && composeLinks.length > 0)) {
     return { status: "skipped", reason: "LinkedIn does not prove a direct connection for this message path." };
   }
-  const isDirectConnection = labels.some((label) =>
-    /^(?:1st|1st degree connection)$/i.test(label)
-    || /\b1st degree connection\b/i.test(label)
-  );
-  if (!isDirectConnection) {
+  if (candidates.some(({ isDirectConnection, composeLinks }) => !isDirectConnection && composeLinks.length > 0)) {
     return { status: "skipped", reason: "LinkedIn does not prove a direct connection for this profile." };
   }
-
-  const composeLinks = observed
-    .filter((element) => elementText(element) === "Message")
-    .map((element) => ({
-      composeHref: element.getAttribute?.("href"),
-      recipientId: composeRecipient(element.getAttribute?.("href")),
-    }))
-    .filter(({ composeHref, recipientId }) => composeHref && recipientId);
-  if (composeLinks.length !== 1) {
-    return { status: "skipped", reason: "A single direct Message action is unavailable for this profile." };
-  }
-
-  return { status: "ready", ...composeLinks[0] };
+  return { status: "skipped", reason: "A single direct Message action is unavailable for this profile." };
 }
 
 export async function sendLinkedInComposeMessage(expectedProfileUrl, expectedRecipientId, message) {
