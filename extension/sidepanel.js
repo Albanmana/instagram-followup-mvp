@@ -5,7 +5,6 @@ import {
   platformLabel,
   recipientLabel,
 } from "./platforms.js";
-import { createExtensionResult } from "./result-reporting.js";
 
 const api = createApiClient({ storage: chromeStorageAdapter, baseUrl: "" });
 const $ = (id) => document.getElementById(id);
@@ -490,31 +489,16 @@ async function pollEngine() {
   }
 
   stopTimers();
-  await reportEngineLogs(engine.batchLogs ?? []);
   await chrome.action.setBadgeText({ text: "" });
   const { coldDmAccount } = await getSettings();
   setHeaderStatus(`● Connected · ${coldDmAccount}`, "ok");
   await refreshToday();
 }
 
-async function reportEngineLogs(batchLogs) {
-  const results = batchLogs
-    .map((log) => createExtensionResult({
-      ...log,
-      reason: log.status === "sent"
-        ? undefined
-        : readableReason(log.reason ?? log.error, log.platform ?? "instagram"),
-    }))
-    .filter(Boolean);
-
-  if (results.length > 0) await api.reportResults(results);
-}
-
 async function pauseRun() {
   const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
   await chrome.runtime.sendMessage({ type: "STOP_BATCH" });
   stopTimers();
-  await reportEngineLogs(engine?.batchLogs ?? []);
   state.pausedItems = (engine?.batchQueue ?? []).slice(engine?.batchIndex ?? 0);
   await chrome.storage.local.set({ pausedItems: state.pausedItems });
   if (state.pausedItems[0]?.platform) await applySelectedPlatform(state.pausedItems[0].platform);
@@ -652,7 +636,6 @@ $("stop-button").addEventListener("click", async () => {
   const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
   await chrome.runtime.sendMessage({ type: "STOP_BATCH" });
   stopTimers();
-  await reportEngineLogs(engine?.batchLogs ?? []);
   state.pausedItems = null;
   await chrome.storage.local.set({ pausedItems: null });
   await chrome.action.setBadgeText({ text: "" });
@@ -676,11 +659,6 @@ async function boot() {
     setHeaderStatus("Not connected");
     showView("connect");
     return;
-  }
-
-  const engine = await chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" });
-  if (engine?.ok && engine.batchStatus !== "running" && (engine.batchLogs ?? []).length > 0) {
-    await reportEngineLogs(engine.batchLogs);
   }
 
   await enterMain();
