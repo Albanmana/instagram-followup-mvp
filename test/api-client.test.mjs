@@ -87,6 +87,17 @@ test("getHistory returns newest first", async () => {
   assert.equal(history[1].handle, "older");
 });
 
+test("getManualTestHistory reads locally stored manual outcomes without credentials", async () => {
+  const storage = memoryStorage({
+    manualTestHistory: [
+      { actionId: "manual-older", at: "2026-07-18T09:00:00Z", localOnly: true },
+      { actionId: "manual-newer", at: "2026-07-19T09:00:00Z", localOnly: true },
+    ],
+  });
+  const api = createApiClient({ storage, baseUrl: "" });
+  assert.deepEqual((await api.getManualTestHistory()).map((entry) => entry.actionId), ["manual-newer", "manual-older"]);
+});
+
 test("claimQueue normalizes the Cold DM claimed action IDs", async () => {
   const storage = memoryStorage({ coldDmApiKey: "cdm_live_test", coldDmBaseUrl: "https://cold-dm.example" });
   const api = createApiClient({

@@ -250,6 +250,30 @@ test("settings visibly prefill the deployed Cold DM App URL", { concurrency: fal
   });
 });
 
+test("manual test starts a local-only row without Cold DM credentials or a queue claim", { concurrency: false }, async () => {
+  await withPanel({
+    storage: { coldDmApiKey: "" },
+    async testBody({ document, requests, runtimeMessages, setCapabilityHandler }) {
+      setCapabilityHandler(async (message) => ({
+        ok: true, platform: message.platform, executable: true, loggedIn: true,
+      }));
+      assert.equal(document.getElementById("view-connect").hidden, false);
+      document.getElementById("manual-test-platform").value = "instagram";
+      document.getElementById("manual-test-target").value = "@alice";
+      document.getElementById("manual-test-message").value = "Hello Alice";
+      await document.getElementById("manual-test-send-button").trigger("click");
+      await settle();
+
+      const start = runtimeMessages.find(({ type }) => type === "START_BATCH");
+      assert.ok(start);
+      assert.equal(start.payload.rows.length, 1);
+      assert.equal(start.payload.rows[0].localOnly, true);
+      assert.equal(start.payload.rows[0].recipient.handle, "alice");
+      assert.equal(requests.some(({ url }) => url.includes("/queue/claim")), false);
+    },
+  });
+});
+
 test("a deferred queue refresh cannot overwrite a newly active run", { concurrency: false }, async () => {
   const pendingQueue = deferred();
   const queueFetchStarted = deferred();

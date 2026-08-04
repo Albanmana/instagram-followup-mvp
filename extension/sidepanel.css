@@ -75,8 +75,29 @@ p {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
+}
+
+.manual-test-card details > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.manual-test-card details > .muted {
+  margin-top: 10px;
+}
+
+textarea {
+  width: 100%;
+  min-height: 80px;
+  padding: 9px 10px;
+  color: var(--ink);
+  resize: vertical;
+  background: var(--card);
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
 }
 
 button:focus-visible,

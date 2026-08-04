@@ -20,6 +20,8 @@ const SCRAPE_POST_TIMEOUT_MS = 30000;
 const SCRAPE_PROFILE_TIMEOUT_MS = 12000;
 const SCRAPE_LOG_LIMIT = 300;
 const RESULT_REPORT_RETRY_ALARM = "COLD_DM_RESULT_REPORT_RETRY";
+const MANUAL_TEST_HISTORY_KEY = "manualTestHistory";
+const MANUAL_TEST_HISTORY_LIMIT = 100;
 const resultApi = createApiClient({ storage: chromeStorageAdapter, baseUrl: "" });
 const resultReportCoordinator = createResultReportCoordinator({
   storage: chromeStorageAdapter,
@@ -48,6 +50,13 @@ async function reportBatchLog(entry) {
   if (!result) return;
   await resultReportCoordinator.enqueue(result);
   startResultOutboxFlush();
+}
+
+async function appendManualTestHistory(entry) {
+  const { [MANUAL_TEST_HISTORY_KEY]: history = [] } = await chrome.storage.local.get(MANUAL_TEST_HISTORY_KEY);
+  await chrome.storage.local.set({
+    [MANUAL_TEST_HISTORY_KEY]: [{ ...entry, localOnly: true }, ...history].slice(0, MANUAL_TEST_HISTORY_LIMIT),
+  });
 }
 
 const adapters = createPlatformAdapters({
@@ -1439,6 +1448,7 @@ async function processBatchItem(index) {
     leadId: row.leadId,
     messageType: row.messageType,
     handle: row.recipient?.handle ?? row.handle,
+    localOnly: row.localOnly === true,
   };
 
   let entry;
@@ -1463,7 +1473,8 @@ async function processBatchItem(index) {
     };
   }
   await appendBatchLog(entry);
-  await reportBatchLog(entry);
+  if (entry.localOnly) await appendManualTestHistory(entry);
+  else await reportBatchLog(entry);
 
   const nextIndex = index + 1;
   await chrome.storage.local.set({ batchIndex: nextIndex });

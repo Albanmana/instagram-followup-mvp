@@ -7,6 +7,7 @@ import {
   platformLabel,
   recipientLabel,
   legacyInstagramProfileUrl,
+  createManualTestItem,
 } from "../extension/platforms.js";
 
 const campaign = { id: "campaign-1", name: "Campaign" };
@@ -111,4 +112,53 @@ test("normalizes the Instagram sender stage sent outcome as sent", () => {
     normalizeSenderOutcome({ stage: "sent", sentText: "Hello" }).status,
     "sent",
   );
+});
+
+test("creates a local-only Instagram manual test from either a handle or profile URL", () => {
+  const fromHandle = createManualTestItem({
+    platform: "instagram",
+    target: "@alice",
+    message: "  Hello Alice  ",
+    id: "manual-1",
+  });
+  const fromUrl = createManualTestItem({
+    platform: "instagram",
+    target: "https://www.instagram.com/alice/",
+    message: "Hello Alice",
+    id: "manual-2",
+  });
+
+  assert.deepEqual(fromHandle, {
+    actionId: "manual-1", messageId: "manual-1", leadId: "manual-1",
+    platform: "instagram", message: "Hello Alice", messageType: "first_dm", localOnly: true,
+    recipient: { displayName: null, handle: "alice", profileUrl: "https://www.instagram.com/alice/" },
+  });
+  assert.deepEqual(fromUrl.recipient, fromHandle.recipient);
+});
+
+test("creates a local-only LinkedIn manual test from either a slug or profile URL", () => {
+  const fromSlug = createManualTestItem({
+    platform: "linkedin",
+    target: "alice-smith",
+    message: "Hello Alice",
+    id: "manual-1",
+  });
+  const fromUrl = createManualTestItem({
+    platform: "linkedin",
+    target: "https://www.linkedin.com/in/alice-smith/",
+    message: "Hello Alice",
+    id: "manual-2",
+  });
+
+  assert.equal(fromSlug.recipient.profileUrl, "https://www.linkedin.com/in/alice-smith/");
+  assert.equal(fromSlug.recipient.handle, "alice-smith");
+  assert.deepEqual(fromUrl.recipient, fromSlug.recipient);
+  assert.equal(fromSlug.localOnly, true);
+});
+
+test("rejects malformed manual recipients, platform mismatches, and blank messages", () => {
+  assert.equal(createManualTestItem({ platform: "instagram", target: "https://www.linkedin.com/in/alice/", message: "Hello" }), null);
+  assert.equal(createManualTestItem({ platform: "linkedin", target: "https://www.instagram.com/alice/", message: "Hello" }), null);
+  assert.equal(createManualTestItem({ platform: "instagram", target: "alice", message: "   " }), null);
+  assert.equal(createManualTestItem({ platform: "linkedin", target: "https://www.linkedin.com/company/cold-dm/", message: "Hello" }), null);
 });

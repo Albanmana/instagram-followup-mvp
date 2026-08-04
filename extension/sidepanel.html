@@ -150,6 +150,30 @@
           <pre id="raw-logs" class="logs" hidden></pre>
         </div>
       </section>
+
+      <section id="manual-test-panel" class="card manual-test-card">
+        <details>
+          <summary>Manual test</summary>
+          <p class="muted">Send one message directly from the selected platform. This is never synced to Cold DM.</p>
+          <label class="field" for="manual-test-platform">
+            <span class="label">Platform</span>
+            <select id="manual-test-platform">
+              <option value="instagram">Instagram</option>
+              <option value="linkedin">LinkedIn</option>
+            </select>
+          </label>
+          <label class="field" for="manual-test-target">
+            <span class="label">Profile URL or handle</span>
+            <input id="manual-test-target" type="text" placeholder="@handle or profile URL" autocomplete="off" />
+          </label>
+          <label class="field" for="manual-test-message">
+            <span class="label">Message</span>
+            <textarea id="manual-test-message" rows="4" placeholder="Write the message to send"></textarea>
+          </label>
+          <p id="manual-test-error" class="error-text" hidden></p>
+          <button id="manual-test-send-button" class="primary" type="button">Send test</button>
+        </details>
+      </section>
     </main>
 
     <script type="module" src="sidepanel.js"></script>

@@ -1,6 +1,7 @@
 import { createApiClient, chromeStorageAdapter, DEFAULT_COLD_DM_APP_URL } from "./api-client.js";
 import {
   isPlatform,
+  createManualTestItem,
   normalizePersistedQueueItems,
   platformLabel,
   recipientLabel,
@@ -510,7 +511,10 @@ async function pauseRun() {
 }
 
 async function renderHistory() {
-  const history = await api.getHistory();
+  const history = [
+    ...(await api.getHistory()).map((entry) => ({ ...entry, source: "Cold DM" })),
+    ...(await api.getManualTestHistory()).map((entry) => ({ ...entry, source: "Manual test" })),
+  ].sort((a, b) => (a.at < b.at ? 1 : -1));
   const list = $("history-list");
   list.innerHTML = "";
   $("history-empty").hidden = history.length > 0;
@@ -531,7 +535,7 @@ async function renderHistory() {
 
     const sub = document.createElement("span");
     const day = new Date(entry.at);
-    sub.textContent = `${day.toLocaleDateString()} ${day.toLocaleTimeString()} · ${messageTypeLabel(entry.messageType)}${entry.reason ? ` · ${entry.reason}` : ""}`;
+    sub.textContent = `${day.toLocaleDateString()} ${day.toLocaleTimeString()} · ${entry.source} · ${messageTypeLabel(entry.messageType)}${entry.reason ? ` · ${entry.reason}` : ""}`;
 
     const status = document.createElement("span");
     status.className = `status ${entry.status === "sent" ? "ok" : "fail"}`;
@@ -540,6 +544,45 @@ async function renderHistory() {
     who.append(name, sub);
     li.append(avatar, who, status);
     list.appendChild(li);
+  }
+}
+
+async function startManualTest() {
+  const platform = $("manual-test-platform").value;
+  const item = createManualTestItem({
+    platform,
+    target: $("manual-test-target").value,
+    message: $("manual-test-message").value,
+  });
+  const error = $("manual-test-error");
+  error.hidden = true;
+  if (!item) {
+    error.textContent = `Enter a valid ${platformLabel(platform)} profile URL or handle and a message.`;
+    error.hidden = false;
+    return;
+  }
+
+  const button = $("manual-test-send-button");
+  button.disabled = true;
+  button.textContent = "Sending…";
+  try {
+    const capability = await getPlatformCapability(platform);
+    if (!capability?.ok || !capability.executable) throw new Error(capability?.reason ?? "Sending is not available for this platform.");
+    if (!capability.loggedIn) throw new Error(capability.loginMessage ?? `Log in to ${platformLabel(platform)} in this browser, then resume.`);
+    const { sendDelaySeconds } = await getSettings();
+    const response = await chrome.runtime.sendMessage({
+      type: "START_BATCH",
+      payload: { rows: [item], delaySeconds: sendDelaySeconds },
+    });
+    if (!response?.ok) throw new Error(response?.error ?? "Could not start the manual test.");
+    $("manual-test-message").value = "";
+    setHeaderStatus("● Manual test running", "run");
+  } catch (exception) {
+    error.textContent = exception instanceof Error ? exception.message : "Could not start the manual test.";
+    error.hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Send test";
   }
 }
 
@@ -619,6 +662,8 @@ $("start-button").addEventListener("click", async () => {
   const started = await startRun(state.queue.items);
   if (!started && state.capability) applyCapability(state.capability, state.queue.items.length > 0);
 });
+
+$("manual-test-send-button").addEventListener("click", startManualTest);
 
 $("pause-button").addEventListener("click", pauseRun);
 
