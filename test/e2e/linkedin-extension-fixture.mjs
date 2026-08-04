@@ -31,14 +31,26 @@ export function createTemporaryExtensionPath() {
   return extensionPath;
 }
 
-export async function launchLinkedInExtensionContext(env = process.env) {
+export function getChromiumWindowSizeArgs(viewport) {
+  if (viewport == null) return [];
+  const { width, height } = viewport;
+  if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+    throw new TypeError("Viewport width and height must be positive integers.");
+  }
+  return [`--window-size=${width},${height}`];
+}
+
+export async function launchLinkedInExtensionContext(env = process.env, viewport) {
+  const windowSizeArgs = getChromiumWindowSizeArgs(viewport);
   const extensionPath = createTemporaryExtensionPath();
   const context = await chromium.launchPersistentContext(getLinkedInProfileDir(env), {
     channel: "chromium",
     headless: false,
+    ...(viewport ? { viewport, screen: viewport } : {}),
     args: [
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
+      ...windowSizeArgs,
     ],
   });
   const worker = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker");

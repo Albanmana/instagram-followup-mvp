@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   assertLiveLinkedInOptIn,
+  getChromiumWindowSizeArgs,
   waitForLinkedInContextClose,
 } from "./linkedin-extension-fixture.mjs";
 
@@ -20,4 +21,16 @@ test("keeps the login launcher open until its persistent context closes", async 
   const closed = waitForLinkedInContextClose(context);
   context.emit("close");
   await closed;
+});
+
+test("builds a native Chromium window-size argument from a viewport", () => {
+  assert.deepEqual(
+    getChromiumWindowSizeArgs({ width: 1280, height: 720 }),
+    ["--window-size=1280,720"]
+  );
+});
+
+test("rejects malformed viewport dimensions", () => {
+  assert.throws(() => getChromiumWindowSizeArgs({ width: 0, height: 720 }), /positive integers/);
+  assert.throws(() => getChromiumWindowSizeArgs({ width: 1280.5, height: 720 }), /positive integers/);
 });
