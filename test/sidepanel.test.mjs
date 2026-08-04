@@ -250,6 +250,36 @@ test("settings visibly prefill the deployed Cold DM App URL", { concurrency: fal
   });
 });
 
+test("opens the sender without an API key and does not request the Cold DM queue", { concurrency: false }, async () => {
+  await withPanel({
+    storage: { coldDmApiKey: "" },
+    async testBody({ document, requests }) {
+      assert.equal(document.getElementById("view-main").hidden, false);
+      assert.match(document.getElementById("queue-sync-status").textContent, /Settings/i);
+      assert.equal(requests.some(({ url }) => url.includes("/api/ext/v1/queue")), false);
+    },
+  });
+});
+
+test("settings save optional Cold DM credentials and the top back control returns to sender", { concurrency: false }, async () => {
+  await withPanel({
+    storage: { coldDmApiKey: "" },
+    async testBody({ data, document }) {
+      await document.getElementById("settings-button").trigger("click");
+      assert.equal(document.getElementById("view-settings").hidden, false);
+      document.getElementById("settings-api-key").value = "not-verified-yet";
+      document.getElementById("settings-base-url").value = "https://cold-dm.example";
+      await document.getElementById("settings-save-button").trigger("click");
+      assert.equal(data.coldDmApiKey, "not-verified-yet");
+      assert.equal(data.coldDmBaseUrl, "https://cold-dm.example");
+      assert.match(document.getElementById("settings-status").textContent, /saved/i);
+
+      await document.getElementById("settings-back-button").trigger("click");
+      assert.equal(document.getElementById("view-main").hidden, false);
+    },
+  });
+});
+
 test("manual test starts a local-only row without Cold DM credentials or a queue claim", { concurrency: false }, async () => {
   await withPanel({
     storage: { coldDmApiKey: "" },

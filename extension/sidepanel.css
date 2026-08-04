@@ -181,6 +181,26 @@ select:focus-visible {
   stroke-width: 0;
 }
 
+.icon-button svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.settings-back {
+  padding: 0;
+  margin: 0 0 14px;
+  color: var(--muted-2);
+  font-weight: 600;
+  cursor: pointer;
+  background: none;
+  border: 0;
+}
+
+.settings-back:hover {
+  color: var(--ink);
+}
+
 .card {
   padding: 14px;
   margin-bottom: 12px;

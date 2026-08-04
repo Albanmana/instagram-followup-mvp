@@ -27,7 +27,6 @@ let lastSeenIndex = -1;
 let queueGeneration = 0;
 
 function showView(name) {
-  $("view-connect").hidden = name !== "connect";
   $("view-main").hidden = name !== "main";
   $("view-settings").hidden = name !== "settings";
 }
@@ -73,13 +72,6 @@ async function getSettings() {
     queuePollingHours,
     selectedPlatform: platform
   };
-}
-
-async function connect(key) {
-  const result = await api.verifyApiKey(key);
-  if (!result.ok) return result;
-  await chrome.storage.local.set({ coldDmApiKey: key, coldDmAccount: result.account });
-  return result;
 }
 
 function selectedPlatform() {
@@ -350,6 +342,12 @@ async function reconcileActiveOrPausedRun() {
 async function refreshToday({ automatic = false } = {}) {
   if (await reconcileActiveOrPausedRun()) return;
 
+  const { coldDmApiKey } = await getSettings();
+  if (!coldDmApiKey) {
+    showQueueUnavailable();
+    return;
+  }
+
   const refreshGeneration = ++queueGeneration;
   const button = $("refresh-queue-button");
   const platform = selectedPlatform();
@@ -378,6 +376,18 @@ async function refreshToday({ automatic = false } = {}) {
     button.disabled = false;
     button.textContent = "Refresh queue";
   }
+}
+
+function showQueueUnavailable() {
+  clearQueuePolling();
+  stopTimers();
+  state.queue = null;
+  $("queue-card").hidden = true;
+  $("empty-card").hidden = true;
+  $("run-card").hidden = true;
+  renderList([]);
+  setPlatformControlsDisabled(false);
+  setQueueSyncStatus("Add your Cold DM API key in Settings to load the queue.");
 }
 
 function stopTimers() {
@@ -586,22 +596,6 @@ async function startManualTest() {
   }
 }
 
-$("connect-button").addEventListener("click", async () => {
-  const key = $("api-key-input").value.trim();
-  $("connect-error").hidden = true;
-  $("connect-button").disabled = true;
-  const result = await connect(key);
-  $("connect-button").disabled = false;
-
-  if (!result.ok) {
-    $("connect-error").textContent = result.error;
-    $("connect-error").hidden = false;
-    return;
-  }
-
-  await enterMain();
-});
-
 $("settings-button").addEventListener("click", async () => {
   const settings = await getSettings();
   $("settings-api-key").value = settings.coldDmApiKey;
@@ -620,17 +614,17 @@ $("settings-save-button").addEventListener("click", async () => {
   const baseUrl = $("settings-base-url").value.trim();
   const delay = Math.min(3600, Math.max(60, parseInt($("delay-input").value, 10) || DEFAULT_DELAY_SECONDS));
   const queuePollingHours = [1, 3, 6, 12, 24].includes(Number($("queue-polling-hours-input").value)) ? Number($("queue-polling-hours-input").value) : DEFAULT_QUEUE_POLLING_HOURS;
-  const result = await connect(key);
-
-  if (!result.ok) {
-    $("settings-status").textContent = result.error;
-    $("settings-status").hidden = false;
-    return;
-  }
-
-  await chrome.storage.local.set({ sendDelaySeconds: delay, coldDmBaseUrl: baseUrl, queuePollingHours });
-  await scheduleQueuePolling();
-  $("settings-status").textContent = "Saved.";
+  await chrome.storage.local.set({
+    coldDmApiKey: key,
+    coldDmAccount: key ? "Cold DM configured" : "",
+    sendDelaySeconds: delay,
+    coldDmBaseUrl: baseUrl,
+    queuePollingHours,
+  });
+  if (key) await scheduleQueuePolling();
+  $("settings-status").textContent = key
+    ? "Saved. The Cold DM queue will be available when this key is valid."
+    : "Saved. Add a Cold DM API key to load the queue.";
   $("settings-status").hidden = false;
 });
 
@@ -692,20 +686,14 @@ $("stop-button").addEventListener("click", async () => {
 async function enterMain() {
   const settings = await getSettings();
   await applySelectedPlatform(settings.selectedPlatform, { persist: false });
-  setHeaderStatus(`● Connected · ${settings.coldDmAccount}`, "ok");
+  setHeaderStatus(settings.coldDmApiKey ? `● ${settings.coldDmAccount}` : "● Manual mode · Cold DM not connected", settings.coldDmApiKey ? "ok" : "");
   showView("main");
   showTab("today");
-  await refreshToday();
+  if (settings.coldDmApiKey) await refreshToday();
+  else showQueueUnavailable();
 }
 
 async function boot() {
-  const settings = await getSettings();
-  if (!settings.coldDmApiKey) {
-    setHeaderStatus("Not connected");
-    showView("connect");
-    return;
-  }
-
   await enterMain();
 }
 
