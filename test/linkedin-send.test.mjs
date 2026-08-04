@@ -205,6 +205,60 @@ test("discovers the sole direct Message action when the visible profile main has
   }
 });
 
+test("keeps a direct Message action visible through LinkedIn display contents wrappers", () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const displayContentsWrapper = {
+    hidden: false,
+    parentElement: null,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 0, height: 0 }),
+  };
+  const directEvidence = {
+    textContent: "1st",
+    hidden: false,
+    parentElement: displayContentsWrapper,
+    getAttribute: () => null,
+  };
+  const messageLink = {
+    textContent: "Message",
+    hidden: false,
+    parentElement: displayContentsWrapper,
+    getAttribute: (attribute) => attribute === "href"
+      ? "/messaging/compose/?recipient=brice-id"
+      : null,
+  };
+  const profileActions = {
+    hidden: false,
+    parentElement: null,
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === "section"
+      ? [profileActions]
+      : [directEvidence, messageLink],
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/brice-biaou-32387b156/" },
+    querySelector: (selector) => selector === "main" ? profileActions : null,
+  };
+  globalThis.getComputedStyle = (element) => element === displayContentsWrapper
+    ? { display: "contents", visibility: "visible" }
+    : { display: "block", visibility: "visible" };
+
+  try {
+    assert.deepEqual(
+      discoverLinkedInComposeHref("https://www.linkedin.com/in/brice-biaou-32387b156/"),
+      {
+        status: "ready",
+        composeHref: "/messaging/compose/?recipient=brice-id",
+        recipientId: "brice-id",
+      }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
 test("ignores a direct Message candidate hidden by an ancestor", () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;

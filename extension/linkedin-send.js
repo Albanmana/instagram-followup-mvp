@@ -61,7 +61,7 @@ export function discoverLinkedInComposeHref(expectedProfileUrl) {
       const style = getComputedStyle(current);
       if (style.display === "none" || style.visibility === "hidden") return false;
       const rect = current.getBoundingClientRect?.();
-      if (rect && (rect.width === 0 || rect.height === 0)) return false;
+      if (style.display !== "contents" && rect && (rect.width === 0 || rect.height === 0)) return false;
     }
     return Boolean(element);
   };
