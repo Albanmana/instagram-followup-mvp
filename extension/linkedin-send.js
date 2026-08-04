@@ -124,8 +124,13 @@ export async function discoverLinkedInComposeHref(expectedProfileUrl) {
     const directCandidates = candidates.filter(({ hasBlockedPath, isDirectConnection, composeLinks }) =>
       !hasBlockedPath && isDirectConnection && composeLinks.length === 1
     );
-    if (directCandidates.length === 1) {
-      return { status: "ready", ...directCandidates[0].composeLinks[0] };
+    const directComposeLinks = [...new Map(
+      directCandidates
+        .flatMap(({ composeLinks }) => composeLinks)
+        .map((link) => [`${link.recipientId}:${link.composeHref}`, link])
+    ).values()];
+    if (directComposeLinks.length === 1) {
+      return { status: "ready", ...directComposeLinks[0] };
     }
     if (candidates.some(({ hasBlockedPath, composeLinks }) => hasBlockedPath && composeLinks.length > 0)) {
       return { status: "skipped", reason: "LinkedIn does not prove a direct connection for this message path." };

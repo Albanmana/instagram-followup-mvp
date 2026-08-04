@@ -4,6 +4,7 @@
 import { isPlatform, normalizeQueueItem } from "./platforms.js";
 
 const RESULTS_KEY = "reportedResults";
+const MANUAL_TEST_HISTORY_KEY = "manualTestHistory";
 const MAX_STORED_RESULTS = 1000;
 export const DEFAULT_COLD_DM_APP_URL = "https://cold-dm-app-phi.vercel.app";
 
@@ -139,7 +140,12 @@ export function createApiClient({ storage, baseUrl, fetchFn = globalThis.fetch, 
     return [...results].sort((a, b) => (a.at < b.at ? 1 : -1));
   }
 
-  return { verifyApiKey, fetchQueue, claimQueue, reportResults, getHistory, now };
+  async function getManualTestHistory() {
+    const { [MANUAL_TEST_HISTORY_KEY]: history = [] } = await storage.get(MANUAL_TEST_HISTORY_KEY);
+    return [...history].sort((a, b) => (a.at < b.at ? 1 : -1));
+  }
+
+  return { verifyApiKey, fetchQueue, claimQueue, reportResults, getHistory, getManualTestHistory, now };
 }
 
 export const chromeStorageAdapter = {

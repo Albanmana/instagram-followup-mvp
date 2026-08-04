@@ -12,6 +12,86 @@ export function legacyInstagramProfileUrl(handle) {
   return `https://www.instagram.com/${encodeURIComponent(handle.replace(/^@+/, ""))}/`;
 }
 
+function nonEmptyString(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function canonicalInstagramRecipient(target) {
+  const value = nonEmptyString(target);
+  if (!value) return null;
+
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const url = new URL(value);
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (
+        !["http:", "https:"].includes(url.protocol)
+        || url.hostname.replace(/^www\./, "").toLowerCase() !== "instagram.com"
+        || parts.length !== 1
+      ) return null;
+      const handle = decodeURIComponent(parts[0]);
+      if (!/^[A-Za-z0-9._]+$/.test(handle)) return null;
+      return { displayName: null, handle, profileUrl: legacyInstagramProfileUrl(handle) };
+    } catch {
+      return null;
+    }
+  }
+
+  const handle = value.replace(/^@+/, "");
+  if (!/^[A-Za-z0-9._]+$/.test(handle)) return null;
+  return { displayName: null, handle, profileUrl: legacyInstagramProfileUrl(handle) };
+}
+
+function canonicalLinkedInRecipient(target) {
+  const value = nonEmptyString(target);
+  if (!value) return null;
+
+  let slug = value.replace(/^@+/, "").replace(/^in\//i, "");
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const url = new URL(value);
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (
+        url.protocol !== "https:"
+        || url.hostname.replace(/^www\./, "").toLowerCase() !== "linkedin.com"
+        || parts.length !== 2
+        || parts[0].toLowerCase() !== "in"
+      ) return null;
+      slug = decodeURIComponent(parts[1]);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!/^[A-Za-z0-9-]+$/.test(slug)) return null;
+  return {
+    displayName: null,
+    handle: slug,
+    profileUrl: `https://www.linkedin.com/in/${encodeURIComponent(slug)}/`,
+  };
+}
+
+export function createManualTestItem({ platform, target, message, id } = {}) {
+  if (!isPlatform(platform)) return null;
+  const text = nonEmptyString(message);
+  const recipient = platform === "instagram"
+    ? canonicalInstagramRecipient(target)
+    : canonicalLinkedInRecipient(target);
+  if (!text || !recipient) return null;
+
+  const localId = nonEmptyString(id) ?? `manual-${crypto.randomUUID()}`;
+  return {
+    actionId: localId,
+    messageId: localId,
+    leadId: localId,
+    platform,
+    message: text,
+    messageType: "first_dm",
+    localOnly: true,
+    recipient,
+  };
+}
+
 export function normalizeQueueItem(raw, campaign = null) {
   const hasLegacyHandle = typeof raw?.handle === "string" && raw.handle.length > 0;
   const platform = isPlatform(raw?.platform)

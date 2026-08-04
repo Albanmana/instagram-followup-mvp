@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test test/*.test.mjs test/e2e/*.test.mjs",
+    "test:e2e:linkedin": "playwright test --config=playwright.live.config.mjs",
+    "login:e2e:linkedin": "node scripts/open-linkedin-playwright-profile.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
   }
 }
