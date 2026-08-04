@@ -69,7 +69,9 @@ export async function launchLinkedInExtensionContext(env = process.env, viewport
 export const liveTest = base.extend({
   extension: async ({}, use, testInfo) => {
     assertLiveLinkedInOptIn();
-    const { context, extensionId, worker, sidepanel, cleanup } = await launchLinkedInExtensionContext();
+    const viewport = testInfo.project.use.viewport;
+    const { context, extensionId, worker, sidepanel, cleanup } =
+      await launchLinkedInExtensionContext(process.env, viewport);
     const consoleErrors = [];
     sidepanel.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(message.text());
@@ -99,6 +101,10 @@ export const liveTest = base.extend({
       });
     } finally {
       if (testInfo.status !== testInfo.expectedStatus) {
+        await testInfo.attach("viewport.json", {
+          body: JSON.stringify({ name: testInfo.project.name, ...viewport }, null, 2),
+          contentType: "application/json",
+        });
         await testInfo.attach("sidepanel.html", {
           body: await sidepanel.content(),
           contentType: "text/html",
