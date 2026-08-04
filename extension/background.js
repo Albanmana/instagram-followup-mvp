@@ -6,6 +6,7 @@ import {
   discoverLinkedInComposeHref,
   sendLinkedInComposeMessage,
   validateLinkedInTestPayload,
+  waitForLinkedInDiscovery,
 } from "./linkedin-send.js";
 import { createApiClient, chromeStorageAdapter } from "./api-client.js";
 import { createExtensionResult } from "./result-reporting.js";
@@ -117,16 +118,17 @@ export async function sendLinkedInTestMessage(rawPayload) {
     await appendRunLog("linkedin-test", `Opened profile tab ${tab.id}; waiting for load.`);
     await waitForTabLoad(tab.id);
 
-    const [discoveryExecution] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: discoverLinkedInComposeHref,
-      args: [payload.profileUrl],
+    const discovery = await waitForLinkedInDiscovery(async () => {
+      const [discoveryExecution] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: discoverLinkedInComposeHref,
+        args: [payload.profileUrl],
+      });
+      if (discoveryExecution?.error) {
+        throw new Error(`LinkedIn profile discovery failed: ${discoveryExecution.error.message ?? "unknown scripting error"}`);
+      }
+      return discoveryExecution?.result;
     });
-    if (discoveryExecution?.error) {
-      throw new Error(`LinkedIn profile discovery failed: ${discoveryExecution.error.message ?? "unknown scripting error"}`);
-    }
-
-    const discovery = discoveryExecution?.result;
     if (!discovery) {
       throw new Error("LinkedIn profile discovery returned no structured result.");
     }

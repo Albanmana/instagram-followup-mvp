@@ -8,6 +8,7 @@ import {
   classifyLinkedInUnavailable,
   discoverLinkedInComposeHref,
   sendLinkedInComposeMessage,
+  waitForLinkedInDiscovery,
 } from "../extension/linkedin-send.js";
 import { installLinkedInTestDebugBridge } from "../extension/linkedin-test-debug-bridge.js";
 
@@ -257,6 +258,115 @@ test("keeps a direct Message action visible through LinkedIn display contents wr
     globalThis.document = originalDocument;
     globalThis.getComputedStyle = originalGetComputedStyle;
   }
+});
+
+test("recognizes LinkedIn first-degree evidence rendered in a paragraph", () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const directEvidence = {
+    textContent: "· 1st",
+    hidden: false,
+    parentElement: null,
+    getAttribute: () => null,
+    getBoundingClientRect: () => ({ width: 26, height: 17 }),
+  };
+  const messageLink = {
+    textContent: "Message",
+    hidden: false,
+    parentElement: null,
+    getAttribute: (attribute) => attribute === "href"
+      ? "/messaging/compose/?recipient=brice-id"
+      : null,
+    getBoundingClientRect: () => ({ width: 90, height: 32 }),
+  };
+  const profileActions = {
+    hidden: false,
+    parentElement: null,
+    getBoundingClientRect: () => ({ width: 800, height: 500 }),
+    querySelector: () => null,
+    querySelectorAll: (selector) => {
+      if (selector === "section") return [profileActions];
+      return selector.split(",").map((part) => part.trim()).includes("p")
+        ? [directEvidence, messageLink]
+        : [messageLink];
+    },
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/brice-biaou-32387b156/" },
+    querySelector: (selector) => selector === "main" ? profileActions : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    assert.deepEqual(
+      discoverLinkedInComposeHref("https://www.linkedin.com/in/brice-biaou-32387b156/"),
+      {
+        status: "ready",
+        composeHref: "/messaging/compose/?recipient=brice-id",
+        recipientId: "brice-id",
+      }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("deduplicates nested profile sections that expose the same direct Message link", () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const directEvidence = { textContent: "1st", hidden: false, parentElement: null, getAttribute: () => null };
+  const messageLink = {
+    textContent: "Message",
+    hidden: false,
+    parentElement: null,
+    getAttribute: (attribute) => attribute === "href" ? "/messaging/compose/?recipient=brice-id" : null,
+  };
+  const profileSection = {
+    hidden: false,
+    parentElement: null,
+    querySelectorAll: () => [directEvidence, messageLink],
+  };
+  const main = {
+    hidden: false,
+    parentElement: null,
+    querySelector: () => null,
+    querySelectorAll: () => [profileSection, profileSection],
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/brice-biaou-32387b156/" },
+    querySelector: (selector) => selector === "main" ? main : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    assert.equal(
+      discoverLinkedInComposeHref("https://www.linkedin.com/in/brice-biaou-32387b156/").status,
+      "ready"
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("retries LinkedIn profile discovery while the profile actions are still rendering", async () => {
+  let attempts = 0;
+  const ready = {
+    status: "ready",
+    composeHref: "/messaging/compose/?recipient=brice-id",
+    recipientId: "brice-id",
+  };
+
+  const result = await waitForLinkedInDiscovery(async () => {
+    attempts += 1;
+    return attempts === 1
+      ? { status: "skipped", reason: "LinkedIn does not prove a direct connection for this profile." }
+      : ready;
+  }, { timeoutMs: 10, intervalMs: 0 });
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, ready);
 });
 
 test("ignores a direct Message candidate hidden by an ancestor", () => {

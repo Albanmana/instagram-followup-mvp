@@ -38,6 +38,19 @@ export function classifyLinkedInUnavailable(reason) {
   return { status: "skipped", reason, at: new Date().toISOString() };
 }
 
+export async function waitForLinkedInDiscovery(runDiscovery, {
+  timeoutMs = 5_000,
+  intervalMs = 250,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let result;
+  do {
+    result = await runDiscovery();
+    if (result?.status === "ready" || Date.now() >= deadline) return result;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  } while (true);
+}
+
 export function discoverLinkedInComposeHref(expectedProfileUrl) {
   const profileIdentity = (value) => {
     try {
@@ -103,7 +116,7 @@ export function discoverLinkedInComposeHref(expectedProfileUrl) {
   }
 
   const candidates = sections.filter(isVisible).map((section) => {
-    const observed = [...(section.querySelectorAll?.("[aria-label], a, button, span") ?? [])]
+    const observed = [...(section.querySelectorAll?.("[aria-label], a, button, span, p") ?? [])]
       .filter(isVisible);
     const labels = observed.map(elementText);
     const hasBlockedPath = labels.some((label) => /\b(?:inmail|open profile)\b/i.test(label));
@@ -124,8 +137,13 @@ export function discoverLinkedInComposeHref(expectedProfileUrl) {
   const directCandidates = candidates.filter(({ hasBlockedPath, isDirectConnection, composeLinks }) =>
     !hasBlockedPath && isDirectConnection && composeLinks.length === 1
   );
-  if (directCandidates.length === 1) {
-    return { status: "ready", ...directCandidates[0].composeLinks[0] };
+  const directComposeLinks = [...new Map(
+    directCandidates
+      .flatMap(({ composeLinks }) => composeLinks)
+      .map((link) => [`${link.recipientId}:${link.composeHref}`, link])
+  ).values()];
+  if (directComposeLinks.length === 1) {
+    return { status: "ready", ...directComposeLinks[0] };
   }
   if (candidates.some(({ hasBlockedPath, composeLinks }) => hasBlockedPath && composeLinks.length > 0)) {
     return { status: "skipped", reason: "LinkedIn does not prove a direct connection for this message path." };
