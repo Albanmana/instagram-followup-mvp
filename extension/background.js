@@ -3,8 +3,9 @@ import { validateBatchRows } from "./batch-validation.js";
 import { normalizePersistedQueueItems, normalizeSenderOutcome } from "./platforms.js";
 import { installLinkedInTestDebugBridge } from "./linkedin-test-debug-bridge.js";
 import {
-  discoverLinkedInComposeHref,
+  discoverLinkedInDeliveryPath,
   sendLinkedInComposeMessage,
+  sendLinkedInInvitationNote,
   validateLinkedInTestPayload,
 } from "./linkedin-send.js";
 import { createApiClient, chromeStorageAdapter } from "./api-client.js";
@@ -119,8 +120,8 @@ export async function sendLinkedInTestMessage(rawPayload) {
 
     const [discoveryExecution] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: discoverLinkedInComposeHref,
-      args: [payload.profileUrl],
+      func: discoverLinkedInDeliveryPath,
+      args: [payload.profileUrl, payload.message],
     });
     if (discoveryExecution?.error) {
       throw new Error(`LinkedIn profile discovery failed: ${discoveryExecution.error.message ?? "unknown scripting error"}`);
@@ -134,18 +135,34 @@ export async function sendLinkedInTestMessage(rawPayload) {
       return { ...discovery, at: discovery.at ?? new Date().toISOString() };
     }
 
-    const composeUrl = new URL(discovery.composeHref, "https://www.linkedin.com").href;
-    await appendRunLog("linkedin-test", `Navigating tab ${tab.id} to the observed compose link.`);
-    await chrome.tabs.update(tab.id, { url: composeUrl });
-    await waitForTabLoad(tab.id);
+    let sendExecution;
+    if (discovery.delivery === "direct") {
+      const composeUrl = new URL(discovery.composeHref, "https://www.linkedin.com").href;
+      await appendRunLog("linkedin-test", `Navigating tab ${tab.id} to the observed direct-message compose link.`);
+      await chrome.tabs.update(tab.id, { url: composeUrl });
+      await waitForTabLoad(tab.id);
 
-    const [sendExecution] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: sendLinkedInComposeMessage,
-      args: [payload.profileUrl, discovery.recipientId, payload.message],
-    });
+      [sendExecution] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: sendLinkedInComposeMessage,
+        args: [payload.profileUrl, discovery.recipientId, payload.message],
+      });
+    } else if (discovery.delivery === "invitation") {
+      await appendRunLog("linkedin-test", `Sending a connection invitation from profile tab ${tab.id}.`);
+      [sendExecution] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: sendLinkedInInvitationNote,
+        args: [payload.profileUrl, payload.message],
+      });
+    } else {
+      return {
+        status: "skipped",
+        reason: "LinkedIn returned an unsupported delivery path.",
+        at: new Date().toISOString(),
+      };
+    }
     if (sendExecution?.error) {
-      throw new Error(`LinkedIn compose send failed: ${sendExecution.error.message ?? "unknown scripting error"}`);
+      throw new Error(`LinkedIn ${discovery.delivery} send failed: ${sendExecution.error.message ?? "unknown scripting error"}`);
     }
 
     const result = sendExecution?.result;
