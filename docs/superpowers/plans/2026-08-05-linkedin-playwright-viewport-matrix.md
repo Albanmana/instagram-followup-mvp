@@ -234,4 +234,3 @@
   Run: `git status --short && git log --oneline -3`
 
   Expected: clean worktree and the two focused commits from Tasks 1 and 2 on top of the viewport design commit.
-
