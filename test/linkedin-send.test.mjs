@@ -7,7 +7,9 @@ import {
   profileIdentityFromUrl,
   classifyLinkedInUnavailable,
   discoverLinkedInComposeHref,
+  discoverLinkedInDeliveryPath,
   sendLinkedInComposeMessage,
+  sendLinkedInInvitationNote,
 } from "../extension/linkedin-send.js";
 import { installLinkedInTestDebugBridge } from "../extension/linkedin-test-debug-bridge.js";
 
@@ -315,6 +317,61 @@ test("waits for the LinkedIn profile actions to render before discovery", async 
   }
 });
 
+test("waits when the profile section renders before its Message action", async () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const originalSetTimeout = globalThis.setTimeout;
+  let actionChecks = 0;
+  const profileLink = {
+    textContent: "",
+    hidden: false,
+    getAttribute: (attribute) => attribute === "href" ? "https://www.linkedin.com/in/alice/" : null,
+  };
+  const messageLink = {
+    textContent: "Message",
+    hidden: false,
+    getAttribute: (attribute) => attribute === "href" ? "/messaging/compose/?recipient=alice-id" : null,
+  };
+  const profileSection = {
+    hidden: false,
+    querySelectorAll() {
+      actionChecks += 1;
+      return actionChecks > 1 ? [profileLink, messageLink] : [profileLink];
+    },
+  };
+  const main = {
+    hidden: false,
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === "section" ? [profileSection] : [],
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/alice/" },
+    querySelector: (selector) => selector === "main" ? main : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+  globalThis.setTimeout = (callback) => {
+    callback();
+    return 0;
+  };
+
+  try {
+    assert.deepEqual(
+      await discoverLinkedInDeliveryPath("https://www.linkedin.com/in/alice/", "Hello Alice"),
+      {
+        status: "ready",
+        delivery: "direct",
+        composeHref: "/messaging/compose/?recipient=alice-id",
+        recipientId: "alice-id",
+      }
+    );
+    assert.ok(actionChecks > 1);
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 test("keeps a visible Message action whose layout wrapper has zero size", async () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;
@@ -453,7 +510,7 @@ test("skips a global Message link that is outside the visible target profile act
   try {
     const outcome = await discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
     assert.equal(outcome.status, "skipped");
-    assert.match(outcome.reason, /direct Message action/i);
+    assert.match(outcome.reason, /profile-scoped Connect action/i);
   } finally {
     globalThis.document = originalDocument;
     globalThis.getComputedStyle = originalGetComputedStyle;
@@ -494,7 +551,7 @@ test("skips clear InMail or Open Profile message paths", async () => {
       };
       const outcome = await discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
       assert.equal(outcome.status, "skipped");
-      assert.match(outcome.reason, /direct connection/i);
+      assert.match(outcome.reason, /normal Message route/i);
     }
   } finally {
     globalThis.document = originalDocument;
@@ -502,7 +559,7 @@ test("skips clear InMail or Open Profile message paths", async () => {
   }
 });
 
-test("skips when the visible profile cannot prove a first-degree connection", async () => {
+test("prefers a visible direct Message route even without first-degree evidence", async () => {
   const originalDocument = globalThis.document;
   const originalGetComputedStyle = globalThis.getComputedStyle;
   const heading = { textContent: "Alice", hidden: false, getAttribute: () => null };
@@ -524,9 +581,231 @@ test("skips when the visible profile cannot prove a first-degree connection", as
   globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
 
   try {
-    const outcome = await discoverLinkedInComposeHref("https://www.linkedin.com/in/alice/");
-    assert.equal(outcome.status, "skipped");
-    assert.match(outcome.reason, /direct connection/i);
+    assert.deepEqual(
+      await discoverLinkedInDeliveryPath("https://www.linkedin.com/in/alice/", "x".repeat(201)),
+      {
+        status: "ready",
+        delivery: "direct",
+        composeHref: "/messaging/compose/?recipient=alice-id",
+        recipientId: "alice-id",
+      }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("skips an over-limit invitation note before clicking Connect", async () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const heading = { textContent: "Alice", hidden: false, getAttribute: () => null };
+  const connect = {
+    textContent: "Connect",
+    hidden: false,
+    getAttribute: () => null,
+  };
+  const profileActions = {
+    hidden: false,
+    querySelector: (selector) => selector === "h1" ? heading : null,
+    querySelectorAll: () => [connect],
+  };
+  heading.closest = () => profileActions;
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/alice/" },
+    querySelector: (selector) => selector === "main" ? profileActions : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    assert.deepEqual(
+      await discoverLinkedInDeliveryPath("https://www.linkedin.com/in/alice/", "x".repeat(201)),
+      {
+        status: "skipped",
+        reason: "LinkedIn invitation notes are limited to 200 characters; the queued message has 201.",
+      }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("discovers More actions as an invitation fallback when Connect is in its menu", async () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const heading = { textContent: "Alice", hidden: false, getAttribute: () => null };
+  const moreActions = {
+    textContent: "",
+    hidden: false,
+    getAttribute: (attribute) => attribute === "aria-label" ? "More actions" : null,
+  };
+  const profileActions = {
+    hidden: false,
+    querySelector: (selector) => selector === "h1" ? heading : null,
+    querySelectorAll: () => [moreActions],
+  };
+  heading.closest = () => profileActions;
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/alice/" },
+    querySelector: (selector) => selector === "main" ? profileActions : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    assert.deepEqual(
+      await discoverLinkedInDeliveryPath("https://www.linkedin.com/in/alice/", "Hello Alice"),
+      { status: "ready", delivery: "invitation" }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("keeps a connected profile Message route when its actions are outside the heading section", async () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const heading = { textContent: "Brice Biaou", hidden: false, getAttribute: () => null };
+  const headingSection = {
+    hidden: false,
+    querySelector: (selector) => selector === "h1" ? heading : null,
+    querySelectorAll: () => [{ textContent: "More actions", hidden: false, getAttribute: () => null }],
+  };
+  heading.closest = () => headingSection;
+  const actionSection = {
+    hidden: false,
+    querySelectorAll: () => [
+      { textContent: "1st", hidden: false, getAttribute: () => null },
+      {
+        textContent: "Message",
+        hidden: false,
+        getAttribute: (attribute) => attribute === "href"
+          ? "/messaging/compose/?recipient=brice-id"
+          : null,
+      },
+    ],
+  };
+  const main = {
+    hidden: false,
+    querySelector: (selector) => selector === "h1" ? heading : null,
+    querySelectorAll: (selector) => selector === "section" ? [headingSection, actionSection] : [],
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/brice-biaou-32387b156/" },
+    querySelector: (selector) => selector === "main" ? main : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    assert.deepEqual(
+      await discoverLinkedInDeliveryPath("https://www.linkedin.com/in/brice-biaou-32387b156/", "Hello Brice"),
+      {
+        status: "ready",
+        delivery: "direct",
+        composeHref: "/messaging/compose/?recipient=brice-id",
+        recipientId: "brice-id",
+      }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("uses a profile-local Message route when LinkedIn omits heading and degree evidence", async () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const profileLink = {
+    textContent: "",
+    hidden: false,
+    getAttribute: (attribute) => attribute === "href" ? "https://www.linkedin.com/in/brice-biaou-32387b156/" : null,
+  };
+  const messageLink = {
+    textContent: "Message",
+    hidden: false,
+    getAttribute: (attribute) => attribute === "href"
+      ? "/messaging/compose/?recipient=brice-id"
+      : null,
+  };
+  const profileSection = { hidden: false, querySelectorAll: () => [profileLink, messageLink] };
+  const main = {
+    hidden: false,
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === "section" ? [profileSection] : [],
+  };
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/brice-biaou-32387b156/" },
+    querySelector: (selector) => selector === "main" ? main : null,
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    assert.deepEqual(
+      await discoverLinkedInDeliveryPath("https://www.linkedin.com/in/brice-biaou-32387b156/", "Hello Brice"),
+      {
+        status: "ready",
+        delivery: "direct",
+        composeHref: "/messaging/compose/?recipient=brice-id",
+        recipientId: "brice-id",
+      }
+    );
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.getComputedStyle = originalGetComputedStyle;
+  }
+});
+
+test("sends an exact invitation note only through the active invitation dialog", async () => {
+  const originalDocument = globalThis.document;
+  const originalGetComputedStyle = globalThis.getComputedStyle;
+  const connect = { textContent: "Connect", hidden: false, clicked: false, click() { this.clicked = true; } };
+  const addNote = { textContent: "Add a note", hidden: false, clicked: false, click() { this.clicked = true; } };
+  const noteField = {
+    hidden: false,
+    value: "",
+    dispatchEvent() {},
+    getAttribute: () => null,
+  };
+  const globalSend = { textContent: "Send", hidden: false, clicked: false, click() { this.clicked = true; } };
+  const dialog = {
+    hidden: false,
+    querySelectorAll() { return [addNote, noteField, dialogSend]; },
+    getAttribute: () => null,
+  };
+  const dialogSend = {
+    textContent: "Send",
+    disabled: false,
+    hidden: false,
+    clicked: false,
+    click() { this.clicked = true; dialog.hidden = true; },
+    getAttribute: () => null,
+  };
+  const heading = { textContent: "Alice", hidden: false, getAttribute: () => null };
+  const profileActions = {
+    hidden: false,
+    querySelector: (selector) => selector === "h1" ? heading : null,
+    querySelectorAll: () => [connect],
+    getAttribute: () => null,
+  };
+  heading.closest = () => profileActions;
+  globalThis.document = {
+    location: { href: "https://www.linkedin.com/in/alice/" },
+    querySelector: (selector) => selector === "main" ? profileActions : null,
+    querySelectorAll: (selector) => selector === '[role="dialog"]' ? [dialog] : [globalSend],
+  };
+  globalThis.getComputedStyle = () => ({ display: "block", visibility: "visible" });
+
+  try {
+    assert.deepEqual(
+      await sendLinkedInInvitationNote("https://www.linkedin.com/in/alice/", "Hello Alice"),
+      { status: "sent", sentText: "Hello Alice" }
+    );
+    assert.equal(connect.clicked, true);
+    assert.equal(addNote.clicked, true);
+    assert.equal(noteField.value, "Hello Alice");
+    assert.equal(dialogSend.clicked, true);
+    assert.equal(globalSend.clicked, false);
   } finally {
     globalThis.document = originalDocument;
     globalThis.getComputedStyle = originalGetComputedStyle;

@@ -38,7 +38,7 @@ export function classifyLinkedInUnavailable(reason) {
   return { status: "skipped", reason, at: new Date().toISOString() };
 }
 
-export async function discoverLinkedInComposeHref(expectedProfileUrl) {
+export async function discoverLinkedInDeliveryPath(expectedProfileUrl, message) {
   const profileIdentity = (value) => {
     try {
       return new URL(value, "https://www.linkedin.com").pathname.replace(/\/$/, "").toLowerCase();
@@ -88,6 +88,12 @@ export async function discoverLinkedInComposeHref(expectedProfileUrl) {
   if (document.location?.href && profileIdentity(document.location.href) !== expectedIdentity) {
     return { status: "skipped", reason: "The current page does not match the expected LinkedIn profile." };
   }
+  const expectedProfileTokens = expectedIdentity
+    .split("/")
+    .filter(Boolean)
+    .at(-1)
+    .split(/[-_]/)
+    .filter((token) => token.length >= 3 && !/\d/.test(token));
 
   const inspect = () => {
     const main = document.querySelector("main");
@@ -107,9 +113,6 @@ export async function discoverLinkedInComposeHref(expectedProfileUrl) {
         .filter(isVisible);
       const labels = observed.map(elementText);
       const hasBlockedPath = labels.some((label) => /\b(?:inmail|open profile)\b/i.test(label));
-      const isDirectConnection = labels.some((label) =>
-        /\b1st\b/i.test(label) || /\b1st degree connection\b/i.test(label)
-      );
       const composeLinks = observed
         .filter((element) => elementText(element) === "Message")
         .map((element) => ({
@@ -118,11 +121,43 @@ export async function discoverLinkedInComposeHref(expectedProfileUrl) {
         }))
         .filter(({ composeHref, recipientId }) => composeHref && recipientId);
 
-      return { hasBlockedPath, isDirectConnection, composeLinks };
+      const connectActions = observed.filter((element) => elementText(element) === "Connect");
+      const moreActions = observed.filter((element) => /^(?:more|more actions)$/i.test(elementText(element)));
+      const hasConnectionEvidence = labels.some((label) =>
+        /\b1st\b/i.test(label) || /\b1st degree connection\b/i.test(label)
+      );
+      const hasProfileEvidence = labels.some((label) => {
+        const normalizedLabel = label.toLowerCase();
+        return expectedProfileTokens.length > 0
+          && expectedProfileTokens.every((token) => normalizedLabel.includes(token));
+      });
+      const hasProfileLink = observed.some((element) =>
+        profileIdentity(element.getAttribute?.("href")) === expectedIdentity
+      );
+
+      return {
+        isHeadingSection: section === legacySection,
+        hasBlockedPath,
+        composeLinks,
+        connectActions,
+        moreActions,
+        hasProfileEvidence,
+        hasProfileLink,
+        hasConnectionEvidence,
+      };
     });
 
-    const directCandidates = candidates.filter(({ hasBlockedPath, isDirectConnection, composeLinks }) =>
-      !hasBlockedPath && isDirectConnection && composeLinks.length === 1
+    const directCandidates = candidates.filter(({
+      isHeadingSection,
+      hasBlockedPath,
+      composeLinks,
+      hasProfileEvidence,
+      hasProfileLink,
+      hasConnectionEvidence,
+    }) =>
+      !hasBlockedPath
+      && composeLinks.length === 1
+      && (isHeadingSection || hasProfileEvidence || hasProfileLink || hasConnectionEvidence)
     );
     const directComposeLinks = [...new Map(
       directCandidates
@@ -130,27 +165,164 @@ export async function discoverLinkedInComposeHref(expectedProfileUrl) {
         .map((link) => [`${link.recipientId}:${link.composeHref}`, link])
     ).values()];
     if (directComposeLinks.length === 1) {
-      return { status: "ready", ...directComposeLinks[0] };
+      return { status: "ready", delivery: "direct", ...directComposeLinks[0] };
     }
     if (candidates.some(({ hasBlockedPath, composeLinks }) => hasBlockedPath && composeLinks.length > 0)) {
-      return { status: "skipped", reason: "LinkedIn does not prove a direct connection for this message path." };
+      return { status: "skipped", reason: "LinkedIn does not offer a normal Message route for this profile." };
     }
-    if (candidates.some(({ isDirectConnection, composeLinks }) => !isDirectConnection && composeLinks.length > 0)) {
-      return { status: "skipped", reason: "LinkedIn does not prove a direct connection for this profile." };
+    const targetCandidates = candidates.filter(({
+      isHeadingSection,
+      hasProfileEvidence,
+      hasProfileLink,
+      hasConnectionEvidence,
+    }) => isHeadingSection || hasProfileEvidence || hasProfileLink || hasConnectionEvidence);
+    const invitationAccessActions = [...new Set(targetCandidates.flatMap(({ connectActions, moreActions }) => [
+      ...connectActions,
+      ...moreActions,
+    ]))];
+    if (invitationAccessActions.length === 1) {
+      const noteLength = String(message ?? "").trim().length;
+      if (noteLength > 200) {
+        return {
+          status: "skipped",
+          reason: `LinkedIn invitation notes are limited to 200 characters; the queued message has ${noteLength}.`,
+        };
+      }
+      return { status: "ready", delivery: "invitation" };
     }
-    return { status: "skipped", reason: "A single direct Message action is unavailable for this profile." };
+    if (invitationAccessActions.length > 1) {
+      return { status: "skipped", reason: "The profile-scoped Connect action is ambiguous." };
+    }
+    return { status: "skipped", reason: "A single profile-scoped Connect action is unavailable." };
   };
 
   const deadline = Date.now() + 8_000;
   let outcome = inspect();
+  const isStillHydrating = (candidate) => candidate.status === "skipped" && [
+    "The visible target LinkedIn profile actions could not be identified.",
+    "A single profile-scoped Connect action is unavailable.",
+  ].includes(candidate.reason);
   while (
-    outcome.reason === "The visible target LinkedIn profile actions could not be identified."
+    isStillHydrating(outcome)
     && Date.now() < deadline
   ) {
     await new Promise((resolve) => setTimeout(resolve, 100));
     outcome = inspect();
   }
   return outcome;
+}
+
+export async function discoverLinkedInComposeHref(expectedProfileUrl) {
+  const outcome = await discoverLinkedInDeliveryPath(expectedProfileUrl, "");
+  if (outcome.status === "ready" && outcome.delivery === "direct") {
+    const { delivery: _delivery, ...directOutcome } = outcome;
+    return directOutcome;
+  }
+  return outcome.status === "skipped"
+    ? outcome
+    : { status: "skipped", reason: "A single direct Message action is unavailable for this profile." };
+}
+
+export async function sendLinkedInInvitationNote(expectedProfileUrl, message) {
+  const profileIdentity = (value) => {
+    try {
+      return new URL(value, "https://www.linkedin.com").pathname.replace(/\/$/, "").toLowerCase();
+    } catch {
+      return null;
+    }
+  };
+  const waitFor = (find, timeoutMs = 8_000) => new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const poll = () => {
+      const value = find();
+      if (value) return resolve(value);
+      if (Date.now() >= deadline) return resolve(null);
+      setTimeout(poll, 100);
+    };
+    poll();
+  });
+  const elementText = (element) => String(
+    element?.innerText ?? element?.textContent ?? element?.getAttribute?.("aria-label") ?? ""
+  ).replace(/\s+/g, " ").trim();
+  const isVisible = (element) => {
+    if (!element || element.hidden || element.getAttribute?.("aria-hidden") === "true") return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden";
+  };
+  const visibleElements = (root, selector) =>
+    [...(root?.querySelectorAll?.(selector) ?? [])].filter(isVisible);
+  const one = (elements) => elements.length === 1 ? elements[0] : null;
+  const textMatch = (root, text) => one(visibleElements(root, "[aria-label], a, button").filter(
+    (element) => elementText(element) === text
+  ));
+
+  const expectedIdentity = profileIdentity(expectedProfileUrl);
+  if (!expectedIdentity) {
+    return { status: "skipped", reason: "The expected LinkedIn profile is invalid." };
+  }
+  if (document.location?.href && profileIdentity(document.location.href) !== expectedIdentity) {
+    return { status: "skipped", reason: "The current page does not match the expected LinkedIn profile." };
+  }
+
+  const textToSend = String(message ?? "").trim();
+  if (!textToSend) return { status: "skipped", reason: "A LinkedIn invitation note is required." };
+  if (textToSend.length > 200) {
+    return {
+      status: "skipped",
+      reason: `LinkedIn invitation notes are limited to 200 characters; the queued message has ${textToSend.length}.`,
+    };
+  }
+
+  const main = document.querySelector("main");
+  const profileActions = main?.querySelector?.("h1")?.closest?.("section") ?? main;
+  if (!profileActions || !isVisible(profileActions)) {
+    return { status: "skipped", reason: "The visible target LinkedIn profile actions could not be identified." };
+  }
+
+  let connect = textMatch(profileActions, "Connect");
+  if (!connect) {
+    const moreActions = one(visibleElements(profileActions, "[aria-label], button").filter((element) =>
+      /^(?:more|more actions)$/i.test(elementText(element))
+    ));
+    if (!moreActions) {
+      return { status: "skipped", reason: "A single profile-scoped Connect action is unavailable." };
+    }
+    moreActions.click();
+    connect = await waitFor(() => textMatch(document, "Connect"));
+  }
+  if (!connect) return { status: "skipped", reason: "A single profile-scoped Connect action is unavailable." };
+  connect.click();
+
+  const invitationDialog = await waitFor(() => one(visibleElements(document, '[role="dialog"]')));
+  if (!invitationDialog) {
+    return { status: "skipped", reason: "LinkedIn invitation dialog is unavailable." };
+  }
+  const addNote = await waitFor(() => textMatch(invitationDialog, "Add a note"));
+  if (!addNote) return { status: "skipped", reason: "LinkedIn Add a note action is unavailable." };
+  addNote.click();
+
+  const noteField = await waitFor(() => one(
+    visibleElements(invitationDialog, "textarea, input").filter((element) => typeof element.value === "string")
+  ));
+  if (!noteField) return { status: "skipped", reason: "LinkedIn invitation note field is unavailable." };
+  noteField.focus?.();
+  noteField.value = textToSend;
+  noteField.dispatchEvent?.(new Event("input", { bubbles: true }));
+  noteField.dispatchEvent?.(new Event("change", { bubbles: true }));
+  if (noteField.value !== textToSend) {
+    return { status: "failed", reason: "LinkedIn could not establish the exact queued invitation note." };
+  }
+
+  const sendButton = await waitFor(() => one(visibleElements(invitationDialog, "button").filter(
+    (element) => elementText(element) === "Send" && !element.disabled
+  )));
+  if (!sendButton) return { status: "skipped", reason: "LinkedIn invitation Send action is unavailable." };
+  sendButton.click();
+
+  const sent = await waitFor(() => !isVisible(invitationDialog));
+  return sent
+    ? { status: "sent", sentText: textToSend }
+    : { status: "failed", reason: "LinkedIn did not confirm that the invitation was sent." };
 }
 
 export async function sendLinkedInComposeMessage(expectedProfileUrl, expectedRecipientId, message) {

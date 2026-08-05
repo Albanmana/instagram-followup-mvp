@@ -4,7 +4,12 @@ import {
   liveTest,
 } from "./linkedin-extension-fixture.mjs";
 
-liveTest("sends one manual LinkedIn test message to Brice", async ({ extension }) => {
+liveTest("sends one manual LinkedIn test message to Brice", async ({ extension }, testInfo) => {
+  const { width, height } = testInfo.project.use.viewport;
+  testInfo.annotations.push({
+    type: "viewport",
+    description: `${testInfo.project.name}: ${width}x${height}`,
+  });
   const message = `Cold DM Playwright e2e ${new Date().toISOString()}`;
 
   await extension.clearManualTestState();

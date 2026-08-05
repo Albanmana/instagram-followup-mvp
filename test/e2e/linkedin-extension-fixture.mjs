@@ -31,14 +31,26 @@ export function createTemporaryExtensionPath() {
   return extensionPath;
 }
 
-export async function launchLinkedInExtensionContext(env = process.env) {
+export function getChromiumWindowSizeArgs(viewport) {
+  if (viewport == null) return [];
+  const { width, height } = viewport;
+  if (!Number.isInteger(width) || width <= 0 || !Number.isInteger(height) || height <= 0) {
+    throw new TypeError("Viewport width and height must be positive integers.");
+  }
+  return [`--window-size=${width},${height}`];
+}
+
+export async function launchLinkedInExtensionContext(env = process.env, viewport) {
+  const windowSizeArgs = getChromiumWindowSizeArgs(viewport);
   const extensionPath = createTemporaryExtensionPath();
   const context = await chromium.launchPersistentContext(getLinkedInProfileDir(env), {
     channel: "chromium",
     headless: false,
+    ...(viewport ? { viewport, screen: viewport } : {}),
     args: [
       `--disable-extensions-except=${extensionPath}`,
       `--load-extension=${extensionPath}`,
+      ...windowSizeArgs,
     ],
   });
   const worker = context.serviceWorkers()[0] || await context.waitForEvent("serviceworker");
@@ -57,7 +69,9 @@ export async function launchLinkedInExtensionContext(env = process.env) {
 export const liveTest = base.extend({
   extension: async ({}, use, testInfo) => {
     assertLiveLinkedInOptIn();
-    const { context, extensionId, worker, sidepanel, cleanup } = await launchLinkedInExtensionContext();
+    const viewport = testInfo.project.use.viewport;
+    const { context, extensionId, worker, sidepanel, cleanup } =
+      await launchLinkedInExtensionContext(process.env, viewport);
     const consoleErrors = [];
     sidepanel.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(message.text());
@@ -87,6 +101,10 @@ export const liveTest = base.extend({
       });
     } finally {
       if (testInfo.status !== testInfo.expectedStatus) {
+        await testInfo.attach("viewport.json", {
+          body: JSON.stringify({ name: testInfo.project.name, ...viewport }, null, 2),
+          contentType: "application/json",
+        });
         await testInfo.attach("sidepanel.html", {
           body: await sidepanel.content(),
           contentType: "text/html",

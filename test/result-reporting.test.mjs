@@ -71,3 +71,15 @@ test("converts a skipped LinkedIn batch log into a strict result", () => {
     at: "2026-07-31T10:00:00.000Z",
   });
 });
+
+test("preserves the precise LinkedIn invitation-note limit reason", () => {
+  const reason = "LinkedIn invitation notes are limited to 200 characters; the queued message has 201.";
+  assert.equal(createExtensionResult({
+    actionId: "00000000-0000-4000-8000-000000000001",
+    platform: "linkedin",
+    recipient: { profileUrl: "https://www.linkedin.com/in/alice/" },
+    status: "skipped",
+    reason,
+    at: "2026-08-05T10:00:00.000Z",
+  }).reason, reason);
+});
