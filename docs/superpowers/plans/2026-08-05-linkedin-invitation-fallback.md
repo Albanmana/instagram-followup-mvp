@@ -292,4 +292,3 @@
   Run: `git status --short && git log --oneline -6`
 
   Expected: clean worktree after the focused commits; retain any unauthorised live invitation test as a documented validation gap rather than faking a send.
-
